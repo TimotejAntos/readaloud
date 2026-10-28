@@ -153,4 +153,9 @@ PDF ──pdf.js──► words + boxes ──► sentences ──► voice engi
 2. OCR for scanned PDFs.
 3. More formats: EPUB, Word, web pages, pasted text.
 
+## License
+
+MIT, see `LICENSE`. The voice model (Kokoro-82M) and PDF.js have their own
+licenses (both Apache-2.0).
+
 ReadAloud is an independent project. It is not affiliated with Speechify.
