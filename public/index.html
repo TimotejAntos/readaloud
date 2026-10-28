@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="robots" content="noindex, nofollow" />
+  <meta name="theme-color" content="#3b5bdb" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="ReadAloud" />
+  <title>ReadAloud</title>
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="icon" href="/icons/icon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <!-- Sign-in (cloud mode) -->
+  <section id="signin" hidden>
+    <div class="signin-box">
+      <div class="brand big-brand">
+        <span class="logo" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+        <span>ReadAloud</span>
+      </div>
+      <p class="sub">Sign in to see your library on every device.</p>
+      <form id="signin-form" class="stack">
+        <label for="email">Your email</label>
+        <input id="email" type="email" autocomplete="username" inputmode="email" required placeholder="you@example.com" />
+        <label for="password">Password</label>
+        <input id="password" type="password" autocomplete="current-password" required />
+        <button class="btn primary wide" id="signin-btn" type="submit">Sign in</button>
+        <button class="linkish" id="send-link" type="button">Forgot it? Email me a sign-in link</button>
+      </form>
+      <div id="link-sent" class="stack" hidden>
+        <p class="note"><b>Check your email.</b> Tap the link in it.</p>
+        <p class="note small">Using the installed app? The link opens your browser instead. Then press and hold the link, copy it, and paste it here:</p>
+        <form id="paste-form" class="stack">
+          <input id="paste" type="text" autocomplete="one-time-code" placeholder="Paste the link (or the code) here" />
+          <button class="btn primary wide" type="submit">Sign in</button>
+        </form>
+        <button class="linkish" id="resend" type="button">Send a new link</button>
+      </div>
+      <button class="linkish" id="use-local" type="button" hidden>Use this PC only, without signing in</button>
+    </div>
+  </section>
+
+  <!-- Library -->
+  <section id="library" hidden>
+    <header class="lib-head">
+      <div class="brand">
+        <span class="logo" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+        <span>ReadAloud</span>
+      </div>
+      <div class="lib-actions">
+        <span class="status-dot" id="voice-status" data-state="loading" title="Voice status"></span>
+        <button class="btn primary" id="add">Upload PDF</button>
+        <button class="icon-btn" id="account-btn" data-pop aria-label="Account and settings" title="Account">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4" /><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6" /></svg>
+        </button>
+        <div class="pop" id="account-pop" hidden>
+          <p class="pop-title" id="account-who"></p>
+          <div class="row" id="mode-row" hidden>
+            <label>Library</label>
+            <div class="seg">
+              <button data-mode="local">This PC</button>
+              <button data-mode="cloud">Cloud</button>
+            </div>
+          </div>
+          <form class="stack" id="password-form" hidden>
+            <label for="new-password">New password</label>
+            <input id="new-password" type="password" autocomplete="new-password" minlength="6" required />
+            <button class="btn wide" type="submit">Save password</button>
+          </form>
+          <button class="btn wide" id="sign-out" hidden>Sign out</button>
+        </div>
+      </div>
+    </header>
+    <main class="lib-main">
+      <h1>Your library</h1>
+      <p class="sub" id="lib-sub">Everything stays on this computer. Drop PDFs anywhere on the page.</p>
+      <div id="import" class="import" hidden>
+        <p><b id="import-count"></b> are on this PC but not in the cloud yet.</p>
+        <button class="btn" id="import-btn">Copy them to the cloud</button>
+      </div>
+      <div id="empty" class="empty" hidden>
+        <div class="drop">
+          <p class="big">Drop a PDF here</p>
+          <p>or</p>
+          <button class="btn primary" id="add2">Choose a file</button>
+        </div>
+      </div>
+      <div id="grid" class="grid"></div>
+    </main>
+    <input id="file" type="file" accept="application/pdf,.pdf" multiple hidden />
+  </section>
+
+  <!-- Reader -->
+  <section id="reader" hidden>
+    <header class="topbar">
+      <button class="icon-btn" id="home" aria-label="Back to library" title="Library">
+        <svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7" /></svg>
+      </button>
+      <h2 id="title"></h2>
+      <div class="seg" role="group" aria-label="View">
+        <button data-set="view" data-value="original">Original</button>
+        <button data-set="view" data-value="text">Text</button>
+      </div>
+      <button class="icon-btn" id="format-btn" data-pop aria-label="Text format" title="Text format">Aa</button>
+      <div class="pop" id="format-pop" hidden>
+        <div class="row only-phone">
+          <label>View</label>
+          <div class="seg">
+            <button data-set="view" data-value="original">Original page</button>
+            <button data-set="view" data-value="text">Clean text</button>
+          </div>
+        </div>
+        <div class="row" data-for-view="text">
+          <label>Font</label>
+          <div class="seg">
+            <button data-set="font" data-value="sans">Sans</button>
+            <button data-set="font" data-value="serif">Serif</button>
+            <button data-set="font" data-value="readable">Readable</button>
+            <button data-set="font" data-value="mono">Mono</button>
+          </div>
+        </div>
+        <div class="row" data-for-view="text">
+          <label>Size</label>
+          <input type="range" min="14" max="34" step="1" data-set="size" />
+        </div>
+        <div class="row" data-for-view="text">
+          <label>Line spacing</label>
+          <div class="seg">
+            <button data-set="line" data-value="1.4">Tight</button>
+            <button data-set="line" data-value="1.7">Normal</button>
+            <button data-set="line" data-value="2.1">Loose</button>
+          </div>
+        </div>
+        <div class="row" data-for-view="text">
+          <label>Width</label>
+          <div class="seg">
+            <button data-set="width" data-value="narrow">Narrow</button>
+            <button data-set="width" data-value="medium">Medium</button>
+            <button data-set="width" data-value="wide">Wide</button>
+          </div>
+        </div>
+        <div class="row">
+          <label>Theme</label>
+          <div class="seg">
+            <button data-set="theme" data-value="light">Light</button>
+            <button data-set="theme" data-value="sepia">Sepia</button>
+            <button data-set="theme" data-value="dark">Dark</button>
+          </div>
+        </div>
+        <div class="row">
+          <label>Highlight</label>
+          <div class="seg">
+            <button data-set="highlight" data-value="both">Word + line</button>
+            <button data-set="highlight" data-value="word">Word</button>
+            <button data-set="highlight" data-value="sentence">Sentence</button>
+            <button data-set="highlight" data-value="off">Off</button>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <main id="scroller" tabindex="-1"></main>
+    <div id="busy" class="busy" hidden></div>
+    <button id="follow" class="follow" hidden>↓ Back to where I'm reading</button>
+
+    <footer class="playerbar">
+      <input id="progress" type="range" min="0" max="0" value="0" aria-label="Position in document" />
+      <div class="controls">
+        <div class="left">
+          <span id="time-left"></span>
+          <span id="page-pos"></span>
+        </div>
+        <div class="center">
+          <button class="icon-btn" id="back" aria-label="Previous sentence" title="Previous sentence (←)">
+            <svg viewBox="0 0 24 24"><path d="M11 6l-6 6 6 6M19 6l-6 6 6 6" /></svg>
+          </button>
+          <button id="play" class="play" aria-label="Play" title="Play / pause (Space)">
+            <svg class="i-play" viewBox="0 0 24 24"><path d="M8 5.5v13l11-6.5z" /></svg>
+            <svg class="i-pause" viewBox="0 0 24 24"><path d="M8 5v14M16 5v14" /></svg>
+            <span class="spinner"></span>
+          </button>
+          <button class="icon-btn" id="fwd" aria-label="Next sentence" title="Next sentence (→)">
+            <svg viewBox="0 0 24 24"><path d="M13 6l6 6-6 6M5 6l6 6-6 6" /></svg>
+          </button>
+        </div>
+        <div class="right">
+          <button class="speed-btn" id="speed-btn" data-pop title="Speed (↑ ↓)">1×</button>
+          <div class="pop up" id="speed-pop" hidden>
+            <div class="speed-head">
+              <button class="icon-btn" id="speed-down" aria-label="Slower">−</button>
+              <span id="speed-value"></span>
+              <button class="icon-btn" id="speed-up" aria-label="Faster">+</button>
+            </div>
+            <input id="speed-range" type="range" min="0.5" max="3.5" step="0.05" aria-label="Speed" />
+            <div class="presets" id="speed-presets"></div>
+          </div>
+          <button class="listen-btn" id="listen-btn" data-pop aria-label="Voice and settings" title="Voice, engine, sleep timer">
+            <span class="status-dot" id="voice-status-2" aria-hidden="true"></span>
+            <span id="listen-label">Voice</span>
+            <span class="sleep-badge" id="sleep-badge" hidden></span>
+          </button>
+          <div class="pop up sheet" id="listen-pop" hidden>
+            <div class="row">
+              <label>Voice engine</label>
+              <div class="seg engines" id="engines"></div>
+              <p class="note small" id="engine-note"></p>
+            </div>
+            <div class="row">
+              <label for="voice">Voice</label>
+              <select id="voice" aria-label="Voice"></select>
+            </div>
+            <div class="row">
+              <label>Sleep timer</label>
+              <div class="seg" id="sleep"></div>
+            </div>
+            <div class="row" id="offline-row" hidden>
+              <label>Offline</label>
+              <button class="btn wide" id="download">Download next chapter for offline</button>
+              <p class="note small" id="download-note"></p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </footer>
+  </section>
+
+  <div id="toast" class="toast" hidden></div>
+  <div class="drag-veil">Drop to add to your library</div>
+  <script src="/vendor/supabase/supabase.js"></script>
+  <script type="module" src="/js/app.js"></script>
+</body>
+</html>

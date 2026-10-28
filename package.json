@@ -1,0 +1,22 @@
+{
+  "name": "readaloud",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local Speechify-style PDF reader with an on-device Kokoro voice.",
+  "scripts": {
+    "start": "node server/server.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "2.117.3",
+    "kokoro-js": "^1.2.1",
+    "pdfjs-dist": "^6.4.299",
+    "phonemizer": "^1.2.1"
+  },
+  "devDependencies": {
+    "pdf-lib": "^1.17.1"
+  },
+  "engines": {
+    "node": ">=22.15"
+  }
+}
