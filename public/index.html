@@ -54,6 +54,10 @@
       </div>
       <div class="lib-actions">
         <span class="status-dot" id="voice-status" data-state="loading" title="Voice status"></span>
+        <button class="btn" id="vault-btn" title="All your highlights">
+          <svg viewBox="0 0 24 24" class="i-inline"><path d="M4 20h4L19 9l-4-4L4 16z" /><path d="M13.5 6.5l4 4" /></svg>
+          <span class="hide-narrow">Highlights</span>
+        </button>
         <button class="btn primary" id="add">Upload PDF</button>
         <button class="icon-btn" id="account-btn" data-pop aria-label="Account and settings" title="Account">
           <svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4" /><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6" /></svg>
@@ -95,6 +99,37 @@
     <input id="file" type="file" accept="application/pdf,.pdf" multiple hidden />
   </section>
 
+  <!-- Highlights vault -->
+  <section id="vault" hidden>
+    <header class="lib-head">
+      <div class="brand">
+        <button class="icon-btn" id="vault-back" aria-label="Back to library" title="Library">
+          <svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7" /></svg>
+        </button>
+        <span>Highlights</span>
+      </div>
+      <div class="lib-actions">
+        <button class="btn" id="vault-meanings">Colors</button>
+        <button class="btn" id="vault-export">Export</button>
+      </div>
+    </header>
+    <main class="lib-main vault-main">
+      <div class="vault-filters">
+        <input id="vault-search" type="search" placeholder="Search your highlights" aria-label="Search your highlights" />
+        <select id="vault-book" aria-label="Book"></select>
+      </div>
+      <div class="chips" id="vault-colors"></div>
+      <p class="note small" id="vault-count"></p>
+      <div id="vault-list"></div>
+      <div id="vault-empty" class="empty" hidden>
+        <div class="drop">
+          <p class="big">No highlights yet</p>
+          <p>Select text while you read, or tap ☆ in the player to save the sentence you hear.</p>
+        </div>
+      </div>
+    </main>
+  </section>
+
   <!-- Reader -->
   <section id="reader" hidden>
     <header class="topbar">
@@ -106,6 +141,9 @@
         <button data-set="view" data-value="original">Original</button>
         <button data-set="view" data-value="text">Text</button>
       </div>
+      <button class="icon-btn" id="reader-vault" aria-label="Highlights in this book" title="Highlights in this book">
+        <svg viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16z" /><path d="M13.5 6.5l4 4" /></svg>
+      </button>
       <button class="icon-btn" id="format-btn" data-pop aria-label="Text format" title="Text format">Aa</button>
       <div class="pop" id="format-pop" hidden>
         <div class="row only-phone">
@@ -167,6 +205,17 @@
     <main id="scroller" tabindex="-1"></main>
     <div id="busy" class="busy" hidden></div>
     <button id="follow" class="follow" hidden>↓ Back to where I'm reading</button>
+    <div id="reel-bar" class="reel-bar" hidden>
+      <span class="reel-swatch" id="reel-swatch"></span>
+      <span class="reel-text" id="reel-text"></span>
+      <button class="icon-btn" id="reel-prev" aria-label="Previous highlight">
+        <svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7" /></svg>
+      </button>
+      <button class="icon-btn" id="reel-next" aria-label="Next highlight">
+        <svg viewBox="0 0 24 24"><path d="M9 5l7 7-7 7" /></svg>
+      </button>
+      <button class="btn" id="reel-stop">Stop</button>
+    </div>
 
     <footer class="playerbar">
       <input id="progress" type="range" min="0" max="0" value="0" aria-label="Position in document" />
@@ -176,6 +225,9 @@
           <span id="page-pos"></span>
         </div>
         <div class="center">
+          <button class="icon-btn" id="save-sentence" aria-label="Save this sentence" title="Save this sentence (S)">
+            <svg viewBox="0 0 24 24"><path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.3-4.1 5.9-.9z" /></svg>
+          </button>
           <button class="icon-btn" id="back" aria-label="Previous sentence" title="Previous sentence (←)">
             <svg viewBox="0 0 24 24"><path d="M11 6l-6 6 6 6M19 6l-6 6 6 6" /></svg>
           </button>
@@ -228,6 +280,49 @@
       </div>
     </footer>
   </section>
+
+  <!-- Highlight menu: shown after you select words or tap a highlight -->
+  <div id="hl-sheet" class="sheet" role="dialog" aria-label="Highlight" hidden>
+    <div class="sheet-head">
+      <p class="sheet-quote" id="hl-quote"></p>
+      <button class="icon-btn" id="hl-close" aria-label="Close">✕</button>
+    </div>
+    <p class="note small" id="hl-path"></p>
+    <div class="hl-colors" id="hl-colors"></div>
+    <div class="hl-row">
+      <span class="note small">Start</span>
+      <button class="nudge" data-nudge="start:-1" aria-label="Start one word earlier">‹</button>
+      <button class="nudge" data-nudge="start:1" aria-label="Start one word later">›</button>
+      <span class="note small">End</span>
+      <button class="nudge" data-nudge="end:-1" aria-label="End one word earlier">‹</button>
+      <button class="nudge" data-nudge="end:1" aria-label="End one word later">›</button>
+      <button class="linkish push-right" id="hl-edit-meanings">Edit meanings</button>
+    </div>
+    <textarea id="hl-note" rows="2" maxlength="2000" placeholder="Add a note (optional)"></textarea>
+    <div class="hl-actions">
+      <button class="btn" id="hl-play">▶ Play</button>
+      <button class="btn" id="hl-copy">Copy</button>
+      <button class="btn" id="hl-delete">Delete</button>
+      <button class="btn primary push-right" id="hl-done">Done</button>
+    </div>
+  </div>
+
+  <!-- What each color means -->
+  <div id="palette-sheet" class="sheet" role="dialog" aria-label="Color meanings" hidden>
+    <div class="sheet-head">
+      <p class="sheet-title">What your colors mean</p>
+      <button class="icon-btn" id="palette-close" aria-label="Close">✕</button>
+    </div>
+    <p class="note small">1–3 words each. The same on all your devices.</p>
+    <div id="palette-rows" class="palette-rows"></div>
+    <div class="add-color">
+      <input type="color" id="new-color" value="#ff5ea8" aria-label="New color" />
+      <input id="new-label" maxlength="24" placeholder="Meaning, e.g. Funny" aria-label="Meaning of the new color" />
+      <button class="btn" id="add-color">Add</button>
+    </div>
+    <p class="note small bad" id="palette-error"></p>
+    <button class="btn primary wide" id="palette-save">Save</button>
+  </div>
 
   <div id="toast" class="toast" hidden></div>
   <div class="drag-veil">Drop to add to your library</div>

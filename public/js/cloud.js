@@ -286,10 +286,51 @@ export async function invokeEngine(engine, jobId) {
   }
 }
 
+// ---------------------------------------------------------------- highlights
+
+const HCOLS = "id,document_id,start_word,end_word,text,prefix,suffix,color,note,chapter,page,paragraph,created_at,updated_at";
+
+export async function listHighlights(documentId) {
+  let q = client.from("ra_highlights").select(HCOLS).order("created_at", { ascending: true });
+  if (documentId) q = q.eq("document_id", documentId);
+  const { data, error } = await q;
+  if (error) throw error;
+  return data;
+}
+
+export async function addHighlight(row) {
+  const { data, error } = await client.from("ra_highlights").insert({ ...row, user_id: user.id }).select(HCOLS).single();
+  if (error) throw error;
+  return data;
+}
+
+export async function updateHighlight(id, patch) {
+  const { data, error } = await client.from("ra_highlights").update(patch).eq("id", id).select(HCOLS).single();
+  if (error) throw error;
+  return data;
+}
+
+export async function removeHighlight(id) {
+  const { error } = await client.from("ra_highlights").delete().eq("id", id);
+  if (error) throw error;
+}
+
+// The colors and what they mean, the same on every device. null = never saved.
+export async function getPalette() {
+  const { data, error } = await client.from("ra_user_settings").select("palette").eq("user_id", user.id).maybeSingle();
+  if (error) throw error;
+  return data?.palette?.length ? data.palette : null;
+}
+
+export async function savePalette(palette) {
+  const { error } = await client.from("ra_user_settings").upsert({ user_id: user.id, palette });
+  if (error) throw error;
+}
+
 // ---------------------------------------------------------------- live updates
 
 let channel = null;
-const listeners = { audio: new Set(), job: new Set(), document: new Set(), engines: new Set() };
+const listeners = { audio: new Set(), job: new Set(), document: new Set(), engines: new Set(), highlight: new Set(), palette: new Set() };
 let enginesOnline = new Set();
 
 export function on(type, fn) {
@@ -305,6 +346,11 @@ export function startLive() {
     .on("postgres_changes", { event: "INSERT", schema: "public", table: "ra_audio", filter: f }, (p) => emit("audio", p.new))
     .on("postgres_changes", { event: "UPDATE", schema: "public", table: "ra_render_jobs", filter: f }, (p) => emit("job", p.new))
     .on("postgres_changes", { event: "UPDATE", schema: "public", table: "ra_documents", filter: f }, (p) => emit("document", p.new))
+    .on("postgres_changes", { event: "INSERT", schema: "public", table: "ra_highlights", filter: f }, (p) => emit("highlight", { type: "upsert", row: p.new }))
+    .on("postgres_changes", { event: "UPDATE", schema: "public", table: "ra_highlights", filter: f }, (p) => emit("highlight", { type: "upsert", row: p.new }))
+    // Realtime cannot filter deletes; the payload is only the id.
+    .on("postgres_changes", { event: "DELETE", schema: "public", table: "ra_highlights" }, (p) => p.old?.id && emit("highlight", { type: "delete", id: p.old.id }))
+    .on("postgres_changes", { event: "*", schema: "public", table: "ra_user_settings", filter: f }, (p) => p.new?.palette && emit("palette", p.new.palette))
     .subscribe();
 
   // The PC worker announces itself here ("presence"), so the phone knows

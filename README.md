@@ -15,8 +15,14 @@ natural AI voice (Kokoro-82M) reads it while each word lights up.
 
 - **Library:** drop PDFs on the page. Each book remembers where you stopped.
 - **AI voice:** Kokoro-82M, 10 English voices (US + UK). Audio is cached, so re-reading is instant.
-- **Highlight:** the current word and sentence, on the real PDF page (Original view)
-  or in clean text (Text view). Click any word to read from there.
+- **Follow along:** the current word and sentence light up, on the real PDF page
+  (Original view) or in clean text (Text view). Click any word to read from there.
+- **Your highlights:** select words (or tap ☆ to save the sentence you hear) in
+  8 colors plus your own. Each color has a 1–3 word meaning you choose, like
+  "Love this" or "Don't get it". Add notes.
+- **Highlights vault:** every highlight with its exact place (book › chapter ›
+  page › paragraph), search, filter by meaning, "Open here", and Markdown export.
+- **Highlight reel:** listen to only your highlighted words, one after another.
 - **Speed:** 0.5× to 3.5×. The pitch stays natural.
 - **Text format:** font, size, line spacing, width, light / sepia / dark theme.
 - **Keys:** Space = play/pause · ← → = sentence · ↑ ↓ = speed.
@@ -52,8 +58,9 @@ PHONE ──job──► SUPABASE ──► voice engine (your PC, DeepInfra, or
 
 1. Make a free project at [supabase.com](https://supabase.com). An existing
    project also works: everything this app adds starts with `ra_`.
-2. Run the migration `supabase/migrations/20261028120000_ra_readaloud_base.sql`:
-   paste it into **SQL Editor → Run**, or use `supabase db push`.
+2. Run both migrations in `supabase/migrations/`, oldest first
+   (`20261028120000_ra_readaloud_base.sql`, then `20261029120000_ra_highlights.sql`):
+   paste each into **SQL Editor → Run**, or use `supabase db push`.
 3. Make your login: **Authentication → Users → Add user** (email + password).
    The app does not let strangers sign up.
 4. **Authentication → URL Configuration:** add `http://localhost:5520` and your
@@ -134,6 +141,7 @@ PDF ──pdf.js──► words + boxes ──► sentences ──► voice engi
 | `public/js/reader.js` | Original + Text views, highlights, autoscroll |
 | `public/js/app.js` | Library, controls, settings |
 | `public/js/cloud.js` | Supabase data layer (cloud version) |
+| `public/js/highlights.js`, `server/highlights.js` | Highlights, color meanings, exact paths, export |
 | `pc-worker/worker.js` | Engine "My PC" |
 | `supabase/functions/ra-engine-kokoro-api/` | Engine "Cloud API" |
 | `engines/modal/`, `supabase/functions/ra-engine-modal/` | Engine "Own GPU" |

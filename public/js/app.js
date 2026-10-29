@@ -9,10 +9,11 @@
 import * as cloud from "./cloud.js";
 import { CLOUD_READY, ENGINES, KOKORO_VOICES } from "./config.js";
 import { buildDocument } from "./document.js";
+import { anchor, buildChapters, checkLabel, colorOf, createHighlightStore, describeRange, MAX_CUSTOM, pathText, toMarkdown } from "./highlights.js";
 import { downloadRange, nextChapter } from "./offline.js";
 import { openPdf } from "./pdf.js";
 import { Player, systemVoices } from "./player.js";
-import { Reader } from "./reader.js";
+import { Reader, sentenceOf } from "./reader.js";
 
 const $ = (s) => document.querySelector(s);
 const IS_LOCALHOST = ["localhost", "127.0.0.1", "[::1]"].includes(location.hostname);
@@ -122,12 +123,14 @@ async function boot() {
   } else {
     loadLocalVoices();
     pollStatus();
+    initHighlights("local");
   }
   showLibrary();
 }
 
 function startCloud() {
   cloud.startLive();
+  initHighlights("cloud");
   cloud.on("document", onDocumentChanged);
   cloud.on("engines", () => {
     updateStatusDots();
@@ -220,7 +223,8 @@ function setMode(mode) {
 let libraryItems = [];
 
 function hideAll() {
-  for (const id of ["#signin", "#library", "#reader"]) $(id).hidden = true;
+  for (const id of ["#signin", "#library", "#reader", "#vault"]) $(id).hidden = true;
+  closeSheets();
 }
 
 async function showLibrary() {
@@ -241,6 +245,7 @@ async function showLibrary() {
   }
   renderLibrary();
   if (isCloud() && IS_LOCALHOST) checkImport();
+  openDeepLink();
 }
 
 function renderLibrary() {
@@ -388,7 +393,10 @@ $("#import-btn").onclick = async () => {
 
 let session = null; // { item, pdf, doc, player, reader, follow }
 
-async function openItem(item) {
+// opts: { highlight } = open at a highlight and make it blink,
+//       { word } = open at a word, { reel: [highlights] } = start a reel.
+async function openItem(item, opts = {}) {
+  closeReader();
   hideAll();
   $("#reader").hidden = false;
   $("#title").textContent = item.title;
@@ -418,32 +426,43 @@ async function openItem(item) {
       setFollow(true);
     },
     onUserScroll: () => setFollow(false),
+    onSelect: (start, end) => openNewSheet(start, end),
+    onHighlightTap: (id) => openEditSheet(id),
   });
   reader.highlight = settings.highlight;
-  session = { item, pdf, doc, player, reader, follow: true };
+  session = { item, pdf, doc, player, reader, follow: true, chapters: [] };
+  session.chaptersReady = buildChapters(pdf, doc)
+    .then((c) => (session && session.doc === doc ? (session.chapters = c) : c))
+    .catch(() => []);
 
   player.speed = settings.speed;
   player.voice = settings.voice;
   player.systemVoice = settings.systemVoice;
   player.setEngine(engineKind(), { documentId: item.id });
   reader.setView(settings.view);
+  refreshReaderHighlights();
 
-  const start = Math.min(item.position?.word || 0, Math.max(0, doc.words.length - 1));
+  const last = Math.max(0, doc.words.length - 1);
+  const at = opts.highlight ? anchor(doc, opts.highlight) : null;
+  const start = Math.min(at ? at.start : opts.word ?? item.position?.word ?? 0, last);
   player.seekWord(start, false);
   reader.setActive(player.word, player.sentence);
-  requestAnimationFrame(() => reader.follow(false));
+  requestAnimationFrame(() => (at ? reader.flash(at.start, at.end) : reader.follow(false)));
 
   player.addEventListener("word", () => {
     reader.setActive(player.word, player.sentence);
     if (session.follow) reader.follow();
     updateProgress();
+    updateSaveButton();
     savePositionSoon();
+    checkReel();
   });
   player.addEventListener("state", (e) => {
     updatePlayButton();
     updateMediaSession();
     if (e.detail?.error && e.detail.error !== "cancelled") toast(e.detail.error, 6000);
     if (player.state === "paused" || player.state === "ended") savePositionNow();
+    if (player.state === "ended" && reel) finishReel();
   });
   player.addEventListener("speed", updateSpeedLabel);
 
@@ -456,11 +475,18 @@ async function openItem(item) {
   fillEngines();
   fillVoiceSelect();
   setupMediaSession();
+  updateSaveButton();
   if (!doc.words.length) toast("No text found. This looks like a scanned PDF.");
+  // A tap started this, but the book took a moment to open. Phones only
+  // allow sound inside a tap, so the reel waits for the Play button.
+  if (opts.reel) startReel(opts.reel, { autoplay: false });
 }
 
 function closeReader() {
   if (!session) return;
+  stopReel();
+  closeSheets();
+  session.reader.dispose();
   savePositionNow();
   session.player.engine?.stop();
   session.player.engine?.dispose?.();
@@ -675,8 +701,8 @@ function setupMediaSession() {
     play: () => session?.player.play(),
     pause: () => session?.player.pause(),
     stop: () => session?.player.pause(),
-    previoustrack: () => session?.player.skipSentence(-1),
-    nexttrack: () => session?.player.skipSentence(1),
+    previoustrack: () => (reel ? playClip(Math.max(0, reel.i - 1)) : session?.player.skipSentence(-1)),
+    nexttrack: () => (reel ? playClip(reel.i + 1) : session?.player.skipSentence(1)),
     seekbackward: () => session?.player.skipSentence(-1),
     seekforward: () => session?.player.skipSentence(1),
   };
@@ -832,6 +858,525 @@ document.addEventListener("click", (e) => {
   if (!e.target.closest(".pop, [data-pop]")) document.querySelectorAll(".pop").forEach((p) => (p.hidden = true));
 });
 
+// ---------------------------------------------------------------------------
+// Highlights
+
+let hl = null; // highlight store (local server or Supabase)
+
+function initHighlights(mode) {
+  if (hl) return;
+  hl = createHighlightStore(mode);
+  hl.on((ev) => {
+    refreshReaderHighlights();
+    updateSaveButton();
+    if (!$("#vault").hidden) renderVault();
+    if (ev.type === "palette" && !$("#hl-sheet").hidden) renderSheet();
+  });
+  hl.load().catch((err) => toast(`Could not load highlights: ${err.message}`));
+}
+
+// Layer 2 of the open book: every saved highlight, in its color.
+function refreshReaderHighlights() {
+  if (!session || !hl) return;
+  const list = [];
+  for (const h of hl.forDocument(session.item.id)) {
+    const a = anchor(session.doc, h);
+    if (a) list.push({ id: h.id, start: a.start, end: a.end, hex: colorOf(hl.palette, h.color).hex });
+  }
+  session.reader.setHighlights(list);
+}
+
+const rangeText = (start, end) => session.doc.words.slice(start, end + 1).map((w) => w.display).join(" ");
+const lastColor = () => (hl.palette.some((c) => c.id === settings.lastColor) ? settings.lastColor : hl.palette[0].id);
+
+// ---- the highlight menu ----
+
+let sheet = null; // { id, start, end } - id is null until a color is picked
+
+function openNewSheet(start, end) {
+  if (!session || !hl) return;
+  sheet = { id: null, start, end, note: "" };
+  renderSheet();
+}
+
+function openEditSheet(id) {
+  const h = hl?.all().find((r) => r.id === id);
+  const saved = session?.reader.saved.find((s) => s.id === id);
+  if (!h || !saved) return;
+  session.reader.clearSelection();
+  sheet = { id, start: saved.start, end: saved.end, note: h.note || "" };
+  renderSheet();
+}
+
+function renderSheet() {
+  if (!sheet || !session) return;
+  const h = sheet.id ? hl.all().find((r) => r.id === sheet.id) : null;
+  const text = rangeText(sheet.start, sheet.end);
+  const where = describeRange(session.doc, session.chapters, sheet.start, sheet.end);
+  const current = h?.color;
+  $("#hl-quote").textContent = text.length > 220 ? `${text.slice(0, 217)}…` : text;
+  $("#hl-quote").style.setProperty("--hlc", current ? colorOf(hl.palette, current).hex : "var(--accent)");
+  $("#hl-path").textContent = `${session.item.title} › ${pathText(where)}`;
+  const box = $("#hl-colors");
+  box.innerHTML = "";
+  for (const c of hl.palette) {
+    const b = document.createElement("button");
+    b.className = "hl-color";
+    b.classList.toggle("on", c.id === current);
+    b.style.setProperty("--hlc", c.hex);
+    b.innerHTML = "<i></i><span></span>";
+    b.querySelector("span").textContent = c.label;
+    b.title = c.label;
+    b.onclick = () => pickColor(c.id);
+    box.append(b);
+  }
+  if ($("#hl-note") !== document.activeElement) $("#hl-note").value = sheet.note;
+  $("#hl-delete").hidden = !h;
+  $("#hl-sheet").hidden = false;
+}
+
+async function pickColor(color) {
+  const s = sheet;
+  if (!s) return;
+  settings.lastColor = color;
+  saveSettings();
+  try {
+    // A note can create the highlight a moment before a color tap does:
+    // wait for that, so the tap changes it instead of making a second one.
+    if (s.creating) await s.creating;
+    if (s.id) {
+      await hl.update(s.id, { color });
+    } else {
+      s.creating = (async () => {
+        await session.chaptersReady;
+        const row = await hl.add({ document_id: session.item.id, ...describeRange(session.doc, session.chapters, s.start, s.end), color, note: $("#hl-note").value.trim() });
+        s.id = row.id;
+        s.note = row.note;
+      })();
+      await s.creating;
+      s.creating = null;
+      session.reader.clearSelection();
+    }
+    if (sheet === s) renderSheet();
+  } catch (err) {
+    s.creating = null;
+    toast(`Could not save: ${err.message}`);
+  }
+}
+
+async function saveNote() {
+  if (!sheet) return;
+  const note = $("#hl-note").value.trim();
+  if (note === sheet.note) return;
+  sheet.note = note;
+  if (sheet.id) await hl.update(sheet.id, { note }).catch((err) => toast(`Could not save the note: ${err.message}`));
+  else if (note) await pickColor(lastColor()); // a note on new words saves them in the last color
+}
+
+$("#hl-note").addEventListener("change", saveNote);
+$("#hl-done").onclick = async () => {
+  await saveNote();
+  closeSheets();
+};
+$("#hl-close").onclick = () => closeSheets();
+$("#hl-delete").onclick = async () => {
+  if (!sheet?.id) return;
+  try {
+    await hl.remove(sheet.id);
+    toast("Highlight deleted.");
+  } catch (err) {
+    toast(err.message);
+  }
+  closeSheets();
+};
+$("#hl-play").onclick = () => {
+  if (!sheet || !session) return;
+  const start = sheet.start;
+  closeSheets();
+  session.player.seekWord(start, true);
+  setFollow(true);
+};
+$("#hl-copy").onclick = async () => {
+  if (!sheet || !session) return;
+  const where = describeRange(session.doc, session.chapters, sheet.start, sheet.end);
+  await copyText(`"${rangeText(sheet.start, sheet.end)}"\n— ${session.item.title}, ${pathText(where)}`);
+};
+$("#hl-edit-meanings").onclick = () => openPalette();
+
+// Grow or shrink the words by one, at either end.
+document.querySelectorAll("[data-nudge]").forEach((b) => {
+  b.onclick = async () => {
+    if (!sheet || !session) return;
+    const [edge, d] = b.dataset.nudge.split(":");
+    const n = Number(d);
+    const max = session.doc.words.length - 1;
+    if (edge === "start") sheet.start = Math.min(sheet.end, Math.max(0, sheet.start + n));
+    else sheet.end = Math.max(sheet.start, Math.min(max, sheet.end + n));
+    if (sheet.id) {
+      await session.chaptersReady;
+      await hl.update(sheet.id, describeRange(session.doc, session.chapters, sheet.start, sheet.end)).catch((err) => toast(err.message));
+    } else session.reader.setSelection(sheet.start, sheet.end);
+    renderSheet();
+  };
+});
+
+function closeSheets() {
+  sheet = null;
+  $("#hl-sheet").hidden = true;
+  $("#palette-sheet").hidden = true;
+  session?.reader.clearSelection();
+}
+
+// ---- "Save this sentence" (for when you only listen) ----
+
+$("#save-sentence").onclick = () => saveCurrentSentence();
+
+async function saveCurrentSentence() {
+  if (!session || !hl) return;
+  const s = session.doc.sentences[session.player.sentence];
+  if (!s) return;
+  if (session.reader.saved.some((h) => h.start <= s.first && s.last <= h.end)) return toast("This sentence is already saved.");
+  try {
+    await session.chaptersReady;
+    const color = lastColor();
+    await hl.add({ document_id: session.item.id, ...describeRange(session.doc, session.chapters, s.first, s.last), color, note: "" });
+    toast(`Saved as "${colorOf(hl.palette, color).label}". Tap it to change.`);
+  } catch (err) {
+    toast(`Could not save: ${err.message}`);
+  }
+}
+
+function updateSaveButton() {
+  if (!session) return;
+  const s = session.doc.sentences[session.player.sentence];
+  const saved = !!s && session.reader.saved.some((h) => h.start <= s.first && s.last <= h.end);
+  $("#save-sentence").classList.toggle("saved", saved);
+}
+
+// ---- what each color means ----
+
+let draftPalette = [];
+
+function openPalette() {
+  if (!hl) return;
+  draftPalette = hl.palette.map((c) => ({ ...c }));
+  $("#hl-sheet").hidden = true;
+  renderPalette();
+  $("#palette-sheet").hidden = false;
+}
+
+function renderPalette() {
+  const box = $("#palette-rows");
+  box.innerHTML = "";
+  $("#palette-error").textContent = "";
+  for (const c of draftPalette) {
+    const custom = c.id.startsWith("c-");
+    const row = document.createElement("div");
+    row.className = "palette-row";
+    row.style.setProperty("--hlc", c.hex);
+    row.innerHTML = `${custom ? '<input type="color" class="swatch" aria-label="Color">' : '<span class="swatch"></span>'}<input type="text" maxlength="24" aria-label="Meaning">${custom ? '<button class="remove" aria-label="Remove color">✕</button>' : "<span></span>"}`;
+    const label = row.querySelector('input[type="text"]');
+    label.value = c.label;
+    label.oninput = () => (c.label = label.value);
+    if (custom) {
+      const pick = row.querySelector('input[type="color"]');
+      pick.value = c.hex;
+      pick.oninput = () => {
+        c.hex = pick.value;
+        row.style.setProperty("--hlc", c.hex);
+      };
+      row.querySelector(".remove").onclick = () => {
+        const used = hl.all().filter((h) => h.color === c.id).length;
+        if (used) return ($("#palette-error").textContent = `${used} highlight(s) use "${c.label}". Give them another color first.`);
+        draftPalette = draftPalette.filter((x) => x !== c);
+        renderPalette();
+      };
+    }
+    box.append(row);
+  }
+  $("#add-color").disabled = draftPalette.filter((c) => c.id.startsWith("c-")).length >= MAX_CUSTOM;
+}
+
+$("#add-color").onclick = () => {
+  const check = checkLabel($("#new-label").value);
+  if (!check.ok) return ($("#palette-error").textContent = check.error);
+  draftPalette.push({ id: `c-${Date.now().toString(36)}`, hex: $("#new-color").value, label: check.value });
+  $("#new-label").value = "";
+  renderPalette();
+};
+$("#palette-save").onclick = async () => {
+  for (const c of draftPalette) {
+    const check = checkLabel(c.label);
+    if (!check.ok) return ($("#palette-error").textContent = `${c.label || "A color"}: ${check.error}`);
+    c.label = check.value;
+  }
+  try {
+    await hl.savePalette(draftPalette);
+    toast("Color meanings saved.");
+    $("#palette-sheet").hidden = true;
+    if (sheet) renderSheet();
+  } catch (err) {
+    $("#palette-error").textContent = err.message;
+  }
+};
+$("#palette-close").onclick = () => {
+  $("#palette-sheet").hidden = true;
+  if (sheet) renderSheet();
+};
+
+// ---- the vault: every highlight, with its exact place ----
+
+const vaultFilter = { q: "", book: "", color: "" };
+
+async function showVault(book = "") {
+  closeReader();
+  hideAll();
+  $("#vault").hidden = false;
+  vaultFilter.book = book;
+  if (!libraryItems.length) libraryItems = await store().list().catch(() => []);
+  if (hl && !hl.loaded) await hl.load().catch(() => {});
+  renderVault();
+}
+
+function vaultRows() {
+  const q = vaultFilter.q.toLowerCase();
+  return (hl?.all() || []).filter(
+    (h) =>
+      (!vaultFilter.book || h.document_id === vaultFilter.book) &&
+      (!vaultFilter.color || h.color === vaultFilter.color) &&
+      (!q || `${h.text} ${h.note} ${h.chapter}`.toLowerCase().includes(q)),
+  );
+}
+
+const titleOf = (id) => libraryItems.find((i) => i.id === id)?.title || "A removed book";
+
+function renderVault() {
+  const all = hl?.all() || [];
+  // Book picker: only books that have highlights.
+  const sel = $("#vault-book");
+  const books = [...new Set(all.map((h) => h.document_id))];
+  sel.innerHTML = "";
+  sel.append(new Option(`All books (${books.length})`, ""));
+  for (const id of books) sel.append(new Option(titleOf(id), id));
+  sel.value = books.includes(vaultFilter.book) ? vaultFilter.book : "";
+
+  const chips = $("#vault-colors");
+  chips.innerHTML = "";
+  const chip = (id, label, hex, count) => {
+    const b = document.createElement("button");
+    b.className = "chip";
+    b.classList.toggle("on", vaultFilter.color === id);
+    if (hex) b.style.setProperty("--hlc", hex);
+    b.innerHTML = `${hex ? "<i></i>" : ""}<span></span> <small>${count}</small>`;
+    b.querySelector("span").textContent = label;
+    b.onclick = () => {
+      vaultFilter.color = vaultFilter.color === id ? "" : id;
+      renderVault();
+    };
+    chips.append(b);
+  };
+  chip("", "All colors", null, all.length);
+  for (const c of hl?.palette || []) chip(c.id, c.label, c.hex, all.filter((h) => h.color === c.id).length);
+
+  const rows = vaultRows();
+  $("#vault-count").textContent = rows.length === 1 ? "1 highlight" : `${rows.length} highlights`;
+  $("#vault-empty").hidden = all.length > 0;
+  const list = $("#vault-list");
+  list.innerHTML = "";
+  const order = [...libraryItems.map((i) => i.id), ...books];
+  const byBook = new Map();
+  for (const id of order) if (!byBook.has(id)) byBook.set(id, rows.filter((h) => h.document_id === id).sort((a, b) => a.start_word - b.start_word));
+  for (const [docId, items] of byBook) {
+    if (!items.length) continue;
+    const sec = document.createElement("section");
+    sec.className = "vault-book";
+    sec.innerHTML = `<div class="vault-book-head"><h2></h2><button class="btn small">▶ Play reel (${items.length})</button></div>`;
+    sec.querySelector("h2").textContent = titleOf(docId);
+    sec.querySelector("button").onclick = () => playReel(docId, items);
+    let chapter = null;
+    for (const h of items) {
+      if (h.chapter !== chapter) {
+        chapter = h.chapter;
+        if (chapter) {
+          const ch = document.createElement("h3");
+          ch.className = "vault-ch";
+          ch.textContent = chapter;
+          sec.append(ch);
+        }
+      }
+      sec.append(vaultCard(h));
+    }
+    list.append(sec);
+  }
+}
+
+function vaultCard(h) {
+  const c = colorOf(hl.palette, h.color);
+  const card = document.createElement("article");
+  card.className = "hl-card";
+  card.style.setProperty("--hlc", c.hex);
+  card.innerHTML = `<div class="path"></div><blockquote></blockquote>${h.note ? '<p class="hl-note-text"></p>' : ""}
+    <div class="hl-card-actions"><button data-a="open">Open here</button><button data-a="listen">▶ Listen</button><button data-a="copy">Copy</button><button data-a="delete">Delete</button></div>`;
+  const path = card.querySelector(".path");
+  const tag = document.createElement("span");
+  tag.className = "chip";
+  tag.style.setProperty("--hlc", c.hex);
+  tag.innerHTML = "<i></i><span></span>";
+  tag.querySelector("span").textContent = c.label;
+  const where = document.createElement("span");
+  where.textContent = [h.page ? `p. ${h.page}` : "", h.paragraph ? `¶ ${h.paragraph}` : ""].filter(Boolean).join(" · ");
+  path.append(tag, where);
+  card.querySelector("blockquote").textContent = h.text;
+  if (h.note) card.querySelector(".hl-note-text").textContent = h.note;
+  card.querySelector('[data-a="open"]').onclick = () => openHere(h);
+  card.querySelector('[data-a="listen"]').onclick = () => playReel(h.document_id, [h]);
+  card.querySelector('[data-a="copy"]').onclick = () => copyText(`"${h.text}"\n— ${titleOf(h.document_id)}, ${pathText(h)}`);
+  card.querySelector('[data-a="delete"]').onclick = async () => {
+    if (!confirm("Delete this highlight?")) return;
+    await hl.remove(h.id).catch((err) => toast(err.message));
+  };
+  return card;
+}
+
+function openHere(h) {
+  const item = libraryItems.find((i) => i.id === h.document_id);
+  if (!item) return toast("That book is not in your library any more.");
+  openItem(item, { highlight: h });
+}
+
+$("#vault-btn").onclick = () => showVault();
+$("#vault-back").onclick = () => showLibrary();
+$("#reader-vault").onclick = () => showVault(session?.item.id || "");
+$("#vault-meanings").onclick = () => openPalette();
+$("#vault-search").oninput = (e) => {
+  vaultFilter.q = e.target.value;
+  renderVault();
+};
+$("#vault-book").onchange = (e) => {
+  vaultFilter.book = e.target.value;
+  renderVault();
+};
+$("#vault-export").onclick = async () => {
+  const rows = vaultRows();
+  if (!rows.length) return toast("Nothing to export yet.");
+  const md = toMarkdown(rows, titleOf, hl.palette, (h) => `${location.origin}/#open=${h.document_id}&w=${h.start_word}`);
+  const name = `readaloud-highlights-${new Date().toISOString().slice(0, 10)}.md`;
+  const file = new File([md], name, { type: "text/markdown" });
+  // Phones: the share sheet (save to Files, Notes, Notion…). PCs: a download.
+  if (navigator.canShare?.({ files: [file] })) {
+    try {
+      return await navigator.share({ files: [file], title: "My highlights" });
+    } catch (err) {
+      if (err.name === "AbortError") return;
+    }
+  }
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(file);
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+};
+
+// Links from the export: #open=<book id>&w=<word>
+function openDeepLink() {
+  const m = location.hash.match(/^#open=([0-9a-f-]{36})&w=(\d+)/);
+  if (!m) return;
+  history.replaceState(null, "", location.pathname);
+  const item = libraryItems.find((i) => i.id === m[1]);
+  if (!item) return toast("That book is not in this library.");
+  const word = Number(m[2]);
+  const h = hl?.all().find((r) => r.document_id === item.id && r.start_word === word);
+  openItem(item, h ? { highlight: h } : { word });
+}
+
+// ---- the highlight reel: only your highlights, one after another ----
+
+let reel = null; // { clips: [{ start, end, color }], i, gap }
+
+function playReel(docId, highlights) {
+  const item = libraryItems.find((i) => i.id === docId);
+  if (!item) return toast("That book is not in your library any more.");
+  const list = [...highlights].sort((a, b) => a.start_word - b.start_word);
+  if (session?.item.id === docId) {
+    hideAll();
+    $("#reader").hidden = false;
+    return startReel(list, { autoplay: true });
+  }
+  openItem(item, { reel: list });
+}
+
+function startReel(highlights, { autoplay }) {
+  if (!session) return;
+  const clips = [];
+  for (const h of highlights) {
+    const a = anchor(session.doc, h);
+    if (a) clips.push({ start: a.start, end: a.end, color: h.color });
+  }
+  if (!clips.length) return toast("These highlights could not be found in the book.");
+  reel = { clips, i: 0, gap: false };
+  $("#reel-bar").hidden = false;
+  playClip(0, autoplay);
+  if (!autoplay) toast("Highlight reel ready. Tap ▶ to start.", 5000);
+}
+
+function playClip(i, autoplay = true) {
+  if (!reel || !session) return;
+  if (i >= reel.clips.length) return finishReel();
+  reel.i = i;
+  const c = reel.clips[i];
+  const color = colorOf(hl.palette, c.color);
+  $("#reel-text").textContent = `Highlight reel · ${i + 1} of ${reel.clips.length} · ${color.label}`;
+  $("#reel-bar").style.setProperty("--hlc", color.hex);
+  reel.gap = true;
+  session.player.seekWord(c.start, autoplay);
+  reel.gap = false;
+  setFollow(true);
+}
+
+// Called on every spoken word: at the end of a clip, go to the next one.
+function checkReel() {
+  if (!reel || reel.gap || !session) return;
+  const w = session.player.word;
+  const c = reel.clips[reel.i];
+  if (w >= c.start && w <= c.end) return;
+  if (w > c.end && w <= c.end + 4) {
+    // A short breath between clips, like a page turn.
+    reel.gap = true;
+    session.player.pause();
+    setTimeout(() => reel && playClip(reel.i + 1), 700);
+  } else stopReel("Reel stopped: you jumped to another place.");
+}
+
+function finishReel() {
+  if (!reel) return;
+  const n = reel.clips.length;
+  session?.player.pause();
+  stopReel(`Reel finished: ${n === 1 ? "1 highlight" : `${n} highlights`}.`);
+}
+
+function stopReel(message) {
+  if (!reel) return;
+  reel = null;
+  $("#reel-bar").hidden = true;
+  if (message) toast(message);
+}
+
+$("#reel-prev").onclick = () => reel && playClip(Math.max(0, reel.i - 1));
+$("#reel-next").onclick = () => reel && playClip(reel.i + 1);
+$("#reel-stop").onclick = () => {
+  session?.player.pause();
+  stopReel();
+};
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast("Copied.");
+  } catch {
+    toast("Could not copy on this device.");
+  }
+}
+
 // ---- keyboard ----
 
 document.addEventListener("keydown", (e) => {
@@ -847,7 +1392,11 @@ document.addEventListener("keydown", (e) => {
   } else if (e.key === "ArrowDown") {
     e.preventDefault();
     setSpeed(session.player.speed - 0.25);
-  } else if (e.key === "Escape") document.querySelectorAll(".pop").forEach((p) => (p.hidden = true));
+  } else if (e.key === "s" || e.key === "S") saveCurrentSentence();
+  else if (e.key === "Escape") {
+    document.querySelectorAll(".pop").forEach((p) => (p.hidden = true));
+    closeSheets();
+  }
 });
 window.addEventListener("beforeunload", savePositionNow);
 // Phones rarely fire beforeunload; leaving the app does fire this.

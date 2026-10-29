@@ -5,12 +5,14 @@
 //   /api/library ...       upload, list, open, rename, delete PDFs
 //   /api/tts               text -> { audioData, audioFormat, speechMarks }
 //   /api/voices, /api/status
+//   /api/highlights ...    highlights (local mode), /api/highlight-palette
 
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { createHighlights } from "./highlights.js";
 import { createLibrary } from "./library.js";
 import * as tts from "./tts.js";
 
@@ -19,6 +21,7 @@ const PORT = Number(process.env.PORT) || 5520;
 // READALOUD_DATA lets tests use a throwaway folder instead of the real library.
 const DATA = process.env.READALOUD_DATA ? path.resolve(process.env.READALOUD_DATA) : path.join(ROOT, "data");
 const library = createLibrary(DATA);
+const highlights = createHighlights(DATA);
 tts.setCacheDir(path.join(DATA, "audio-cache"));
 
 const STATIC = [
@@ -110,7 +113,33 @@ async function api(req, res, url) {
       return item ? send(res, 200, item) : send(res, 404, { error: "not found" });
     }
     if (id && req.method === "DELETE") {
-      return (await library.remove(id)) ? send(res, 200, { ok: true }) : send(res, 404, { error: "not found" });
+      if (!(await library.remove(id))) return send(res, 404, { error: "not found" });
+      await highlights.removeForDocument(id);
+      return send(res, 200, { ok: true });
+    }
+  }
+
+  if (parts[1] === "highlight-palette") {
+    if (req.method === "GET") return send(res, 200, (await highlights.getPalette()) || []);
+    if (req.method === "PUT") {
+      const palette = JSON.parse((await readBody(req, 1e5)).toString("utf8"));
+      if (!Array.isArray(palette)) return send(res, 400, { error: "palette must be a list" });
+      await highlights.savePalette(palette);
+      return send(res, 200, palette);
+    }
+  }
+
+  if (parts[1] === "highlights") {
+    const id = parts[2];
+    const json = async () => JSON.parse((await readBody(req, 1e6)).toString("utf8"));
+    if (!id && req.method === "GET") return send(res, 200, await highlights.list(url.searchParams.get("doc")));
+    if (!id && req.method === "POST") return send(res, 201, await highlights.add(await json()));
+    if (id && req.method === "PATCH") {
+      const row = await highlights.update(id, await json());
+      return row ? send(res, 200, row) : send(res, 404, { error: "not found" });
+    }
+    if (id && req.method === "DELETE") {
+      return (await highlights.remove(id)) ? send(res, 200, { ok: true }) : send(res, 404, { error: "not found" });
     }
   }
   return send(res, 404, { error: "unknown api route" });
