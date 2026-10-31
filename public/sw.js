@@ -2,7 +2,7 @@
 // without internet. Books and audio are kept by the app itself (Cache
 // Storage "ra-files"); this file never touches Supabase or /api requests.
 
-const VERSION = "ra-shell-v7";
+const VERSION = "ra-shell-v12";
 const SHELL = [
   "/",
   "/index.html",
@@ -13,6 +13,7 @@ const SHELL = [
   "/js/config.js",
   "/js/document.js",
   "/js/highlights.js",
+  "/js/tutor.js",
   "/js/offline.js",
   "/js/pdf.js",
   "/js/pdf-worker.mjs",

@@ -288,7 +288,7 @@ export async function invokeEngine(engine, jobId) {
 
 // ---------------------------------------------------------------- highlights
 
-const HCOLS = "id,document_id,start_word,end_word,text,prefix,suffix,color,note,chapter,page,paragraph,created_at,updated_at";
+const HCOLS = "id,document_id,start_word,end_word,text,prefix,suffix,color,note,chapter,page,paragraph,explained_message_id,created_at,updated_at";
 
 export async function listHighlights(documentId) {
   let q = client.from("ra_highlights").select(HCOLS).order("created_at", { ascending: true });
@@ -324,6 +324,131 @@ export async function getPalette() {
 
 export async function savePalette(palette) {
   const { error } = await client.from("ra_user_settings").upsert({ user_id: user.id, palette });
+  if (error) throw error;
+}
+
+// ---------------------------------------------------------------- tutor (docs/TUTOR.md)
+
+// How many pieces of this book exist, and how many still need search numbers.
+export async function chunkStatus(documentId) {
+  const all = await client.from("ra_chunks").select("id", { count: "exact", head: true }).eq("document_id", documentId);
+  if (all.error) throw all.error;
+  const left = await client.from("ra_chunks").select("id", { count: "exact", head: true }).eq("document_id", documentId).is("embedding", null);
+  if (left.error) throw left.error;
+  return { total: all.count ?? 0, left: left.count ?? 0 };
+}
+
+export async function addChunks(documentId, chunks) {
+  for (let i = 0; i < chunks.length; i += 100) {
+    const rows = chunks.slice(i, i + 100).map((c) => ({ ...c, document_id: documentId, user_id: user.id }));
+    const { error } = await client.from("ra_chunks").upsert(rows, { onConflict: "document_id,chunk_no", ignoreDuplicates: true });
+    if (error) throw error;
+  }
+}
+
+// One round of search numbers (the function does a small batch per call).
+export async function indexChunks(documentId) {
+  const { data, error } = await client.functions.invoke("ra-tutor-index", { body: { document_id: documentId } });
+  if (error) throw new Error((await error.context?.json?.().catch(() => null))?.error || error.message);
+  return data; // { made, left }
+}
+
+// Ask the tutor. onLine gets each JSON line: meta, text, done, error.
+export async function askTutor(body, onLine) {
+  const { data } = await client.auth.getSession();
+  const token = data.session?.access_token;
+  if (!token) throw new Error("Please sign in again.");
+  const res = await fetch(`${SUPABASE_URL}/functions/v1/ra-tutor`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, apikey: SUPABASE_KEY, "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok || !res.body) {
+    const err = await res.json().catch(() => null);
+    throw new Error(err?.error || (res.status === 404 ? "The tutor is not deployed yet." : `Tutor error ${res.status}`));
+  }
+  const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
+  let buf = "";
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += value;
+    let nl;
+    while ((nl = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (line) onLine(JSON.parse(line));
+    }
+  }
+  if (buf.trim()) onLine(JSON.parse(buf));
+}
+
+// The newest chat for this book (documentId = null: the "all my books" chat).
+export async function latestThread(documentId) {
+  let q = client.from("ra_tutor_threads").select("id,document_id,title,updated_at").order("updated_at", { ascending: false }).limit(1);
+  q = documentId ? q.eq("document_id", documentId) : q.is("document_id", null);
+  const { data, error } = await q;
+  if (error) throw error;
+  return data?.[0] || null;
+}
+
+export async function threadMessages(threadId) {
+  const { data, error } = await client.from("ra_tutor_messages").select("id,role,content,parts,sources,created_at").eq("thread_id", threadId).order("created_at");
+  if (error) throw error;
+  return data || [];
+}
+
+// The learner profile: how the tutor should teach this user.
+export async function getTutorProfile() {
+  const { data, error } = await client.from("ra_user_settings").select("tutor").eq("user_id", user.id).maybeSingle();
+  if (error) throw error;
+  return data?.tutor || {};
+}
+
+export async function saveTutorProfile(tutor) {
+  const { error } = await client.from("ra_user_settings").upsert({ user_id: user.id, tutor });
+  if (error) throw error;
+}
+
+// The chat a tutor message belongs to (to show a saved explanation again).
+export async function messageThread(messageId) {
+  const { data, error } = await client.from("ra_tutor_messages").select("thread_id").eq("id", messageId).maybeSingle();
+  if (error) throw error;
+  return data?.thread_id || null;
+}
+
+// ---------------------------------------------------------------- quizzes
+
+const QCOLS = "id,document_id,scope,title,questions,answers,score,total,created_at,finished_at";
+
+// body = { document_id, scope, count, chapter?, word?, ranges? }. Takes 10–40 s.
+export async function makeQuiz(body) {
+  const { data, error } = await client.functions.invoke("ra-tutor-quiz", { body });
+  if (error) throw new Error((await error.context?.json?.().catch(() => null))?.error || error.message);
+  return data.quiz;
+}
+
+export async function listQuizzes(documentId) {
+  const { data, error } = await client.from("ra_quizzes").select(QCOLS).eq("document_id", documentId).order("created_at", { ascending: false }).limit(20);
+  if (error) throw error;
+  return data || [];
+}
+
+// The same questions again, as a new attempt.
+export async function retakeQuiz(quiz) {
+  const { data, error } = await client
+    .from("ra_quizzes")
+    .insert({ user_id: user.id, document_id: quiz.document_id, scope: quiz.scope, title: quiz.title, questions: quiz.questions, total: quiz.total })
+    .select(QCOLS)
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+export async function saveQuizAnswers(id, answers, done) {
+  const patch = { answers };
+  if (done) Object.assign(patch, { score: done.score, finished_at: new Date().toISOString() });
+  const { error } = await client.from("ra_quizzes").update(patch).eq("id", id);
   if (error) throw error;
 }
 
@@ -379,7 +504,7 @@ export async function engineStatus(engine) {
   if (engine === "device") return { ok: true };
   if (!navigator.onLine) return { ok: false, note: "Offline. Only saved chapters and the phone voice work." };
   if (engine === "pc") {
-    return enginesOnline.has("pc") ? { ok: true, note: "PC voice is on." } : { ok: false, note: "PC voice is off. On the PC, double-click start.cmd." };
+    return enginesOnline.has("pc") ? { ok: true, note: "PC voice is on." } : { ok: false, note: "PC voice is off. On the PC: the service key must be in pc-worker/.env, then double-click start.cmd." };
   }
   // Edge Function engines: a call to a function that is not deployed answers 404.
   try {

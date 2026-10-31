@@ -23,6 +23,11 @@ natural AI voice (Kokoro-82M) reads it while each word lights up.
 - **Highlights vault:** every highlight with its exact place (book › chapter ›
   page › paragraph), search, filter by meaning, "Open here", and Markdown export.
 - **Highlight reel:** listen to only your highlighted words, one after another.
+- **Tutor (cloud):** ask about a book or all your books. It answers like a teacher,
+  only from your books, with a numbered source for each point that opens the
+  exact page or reads it aloud. Flag words "Don't get it" and it explains them
+  at once. Quizzes (ABCD, scored, with the page for every answer) after a book
+  or whenever you ask. See `docs/TUTOR.md`.
 - **Speed:** 0.5× to 3.5×. The pitch stays natural.
 - **Text format:** font, size, line spacing, width, light / sepia / dark theme.
 - **Keys:** Space = play/pause · ← → = sentence · ↑ ↓ = speed.
@@ -59,7 +64,7 @@ PHONE ──job──► SUPABASE ──► voice engine (your PC, DeepInfra, or
 1. Make a free project at [supabase.com](https://supabase.com). An existing
    project also works: everything this app adds starts with `ra_`.
 2. Run both migrations in `supabase/migrations/`, oldest first
-   (`20261028120000_ra_readaloud_base.sql`, then `20261029120000_ra_highlights.sql`):
+   (`20261028120000_ra_readaloud_base.sql`, `20261029120000_ra_highlights.sql`, `20261031120000_ra_tutor.sql`, `20261031130000_ra_tutor_openai.sql`, then `20261031140000_ra_quizzes.sql`):
    paste each into **SQL Editor → Run**, or use `supabase db push`.
 3. Make your login: **Authentication → Users → Add user** (email + password).
    The app does not let strangers sign up.
@@ -124,6 +129,7 @@ Details, measurements and cost tips: `engines/modal/README.md`.
 | Supabase service role key | `pc-worker/.env` | the browser, git, chat |
 | `DEEPINFRA_API_KEY` | Supabase Edge Function secrets | the browser, git |
 | `MODAL_ENGINE_TOKEN` | Modal secret + Supabase Edge Function secrets | the browser, git |
+| `OPENAI_API_KEY` (tutor) | Supabase Edge Function secrets | the browser, git |
 
 ## How it works
 

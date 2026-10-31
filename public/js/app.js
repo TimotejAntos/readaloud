@@ -9,11 +9,12 @@
 import * as cloud from "./cloud.js";
 import { CLOUD_READY, ENGINES, KOKORO_VOICES } from "./config.js";
 import { buildDocument } from "./document.js";
-import { anchor, buildChapters, checkLabel, colorOf, createHighlightStore, describeRange, MAX_CUSTOM, pathText, toMarkdown } from "./highlights.js";
+import { anchor, buildChapters, chapterAt, checkLabel, colorOf, createHighlightStore, describeRange, MAX_CUSTOM, pathText, toMarkdown } from "./highlights.js";
 import { downloadRange, nextChapter } from "./offline.js";
 import { openPdf } from "./pdf.js";
 import { Player, systemVoices } from "./player.js";
 import { Reader, sentenceOf } from "./reader.js";
+import { answerHtml, chunkDocument, sourcePath } from "./tutor.js";
 
 const $ = (s) => document.querySelector(s);
 const IS_LOCALHOST = ["localhost", "127.0.0.1", "[::1]"].includes(location.hostname);
@@ -105,7 +106,21 @@ const store = () => (isCloud() ? cloudStore : localStore);
 
 async function boot() {
   if ("serviceWorker" in navigator && (location.protocol === "https:" || IS_LOCALHOST)) {
-    navigator.serviceWorker.register("/sw.js").catch(() => {});
+    // A phone app on the home screen often wakes up instead of reloading, so it
+    // would keep an old version for days. Look for a new one each time it comes
+    // back, and load it as soon as it takes over (unless a book is playing).
+    navigator.serviceWorker
+      .register("/sw.js")
+      .then((reg) => document.addEventListener("visibilitychange", () => !document.hidden && reg.update().catch(() => {})))
+      .catch(() => {});
+    const hadController = !!navigator.serviceWorker.controller;
+    let reloading = false;
+    navigator.serviceWorker.addEventListener("controllerchange", () => {
+      if (!hadController || reloading) return;
+      if (session?.player.state === "playing") return toast("ReadAloud was updated. The new version loads next time you open it.");
+      reloading = true;
+      location.reload();
+    });
   }
   if (isCloud()) {
     // A used or old email link comes back as #error=...; read it before the client clears it.
@@ -225,6 +240,8 @@ let libraryItems = [];
 function hideAll() {
   for (const id of ["#signin", "#library", "#reader", "#vault"]) $(id).hidden = true;
   closeSheets();
+  closeTutor();
+  closeQuiz();
 }
 
 async function showLibrary() {
@@ -434,6 +451,9 @@ async function openItem(item, opts = {}) {
   session.chaptersReady = buildChapters(pdf, doc)
     .then((c) => (session && session.doc === doc ? (session.chapters = c) : c))
     .catch(() => []);
+  // The tutor needs the book cut into pieces once; do it quietly in the background.
+  $("#tutor-btn").hidden = !CLOUD_READY;
+  if (isCloud()) session.chaptersReady.then((c) => prepareBook(item, doc, c)).catch(() => {});
 
   player.speed = settings.speed;
   player.voice = settings.voice;
@@ -463,6 +483,7 @@ async function openItem(item, opts = {}) {
     if (e.detail?.error && e.detail.error !== "cancelled") toast(e.detail.error, 6000);
     if (player.state === "paused" || player.state === "ended") savePositionNow();
     if (player.state === "ended" && reel) finishReel();
+    else if (player.state === "ended" && player.word >= doc.words.length - 80) offerFinishQuiz();
   });
   player.addEventListener("speed", updateSpeedLabel);
 
@@ -546,11 +567,14 @@ const usesSystemVoice = () => engineKind() === "system";
 function fillEngines() {
   const box = $("#engines");
   box.innerHTML = "";
+  // On the PC library, the cloud engines are shown too: they need the Cloud
+  // library (their jobs and audio live in Supabase), so they offer the switch.
   const list = isCloud()
     ? ENGINES
     : [
         { id: "local", name: "This PC", note: "Kokoro on this computer." },
         { id: "system", name: "System voice", note: "The voices built into Windows. Exact word timing." },
+        ...(CLOUD_READY ? ENGINES.filter((e) => e.id === "kokoro_api" || e.id === "modal").map((e) => ({ ...e, cloudOnly: true })) : []),
       ];
   const current = isCloud() ? settings.engine : settings.localEngine;
   for (const e of list) {
@@ -558,10 +582,24 @@ function fillEngines() {
     b.textContent = e.name;
     b.dataset.engine = e.id;
     b.classList.toggle("on", e.id === current);
-    b.onclick = () => setEngine(e.id);
+    b.classList.toggle("cloud-only", !!e.cloudOnly);
+    b.onclick = () =>
+      e.cloudOnly ? $("#engine-note").replaceChildren(cloudOffer(`${e.name} works with your Cloud library.`)) : setEngine(e.id);
     box.append(b);
   }
   refreshEngineNote();
+}
+
+// "Switch to Cloud" with one tap (the PC library stays on this computer).
+function cloudOffer(text) {
+  const box = document.createElement("span");
+  box.className = "cloud-offer";
+  const btn = document.createElement("button");
+  btn.className = "btn primary";
+  btn.textContent = "Switch to Cloud";
+  btn.onclick = () => setMode("cloud");
+  box.append(text, " ", btn);
+  return box;
 }
 
 async function refreshEngineNote() {
@@ -932,12 +970,15 @@ function renderSheet() {
   }
   if ($("#hl-note") !== document.activeElement) $("#hl-note").value = sheet.note;
   $("#hl-delete").hidden = !h;
+  $("#hl-explain").hidden = !CLOUD_READY;
+  $("#hl-explained").hidden = !h?.explained_message_id;
   $("#hl-sheet").hidden = false;
 }
 
 async function pickColor(color) {
   const s = sheet;
   if (!s) return;
+  const before = s.id ? hl.all().find((r) => r.id === s.id)?.color : null;
   settings.lastColor = color;
   saveSettings();
   try {
@@ -958,6 +999,7 @@ async function pickColor(color) {
       session.reader.clearSelection();
     }
     if (sheet === s) renderSheet();
+    if (isCloud() && isConfused(color) && !(before && isConfused(before))) explainWords(s.start, s.end, s.id);
   } catch (err) {
     s.creating = null;
     toast(`Could not save: ${err.message}`);
@@ -1002,6 +1044,11 @@ $("#hl-copy").onclick = async () => {
   await copyText(`"${rangeText(sheet.start, sheet.end)}"\n— ${session.item.title}, ${pathText(where)}`);
 };
 $("#hl-edit-meanings").onclick = () => openPalette();
+$("#hl-explain").onclick = () => sheet && explainWords(sheet.start, sheet.end, sheet.id);
+$("#hl-explained").onclick = () => {
+  const h = sheet?.id && hl.all().find((r) => r.id === sheet.id);
+  if (h?.explained_message_id) showExplanation(h.explained_message_id);
+};
 
 // Grow or shrink the words by one, at either end.
 document.querySelectorAll("[data-nudge]").forEach((b) => {
@@ -1024,6 +1071,8 @@ function closeSheets() {
   sheet = null;
   $("#hl-sheet").hidden = true;
   $("#palette-sheet").hidden = true;
+  $("#quiz-sheet").hidden = true;
+  $("#finish-sheet").hidden = true;
   session?.reader.clearSelection();
 }
 
@@ -1216,7 +1265,7 @@ function vaultCard(h) {
   card.className = "hl-card";
   card.style.setProperty("--hlc", c.hex);
   card.innerHTML = `<div class="path"></div><blockquote></blockquote>${h.note ? '<p class="hl-note-text"></p>' : ""}
-    <div class="hl-card-actions"><button data-a="open">Open here</button><button data-a="listen">▶ Listen</button><button data-a="copy">Copy</button><button data-a="delete">Delete</button></div>`;
+    <div class="hl-card-actions"><button data-a="open">Open here</button><button data-a="listen">▶ Listen</button>${h.explained_message_id ? '<button data-a="explained">Explanation</button>' : ""}<button data-a="copy">Copy</button><button data-a="delete">Delete</button></div>`;
   const path = card.querySelector(".path");
   const tag = document.createElement("span");
   tag.className = "chip";
@@ -1230,6 +1279,9 @@ function vaultCard(h) {
   if (h.note) card.querySelector(".hl-note-text").textContent = h.note;
   card.querySelector('[data-a="open"]').onclick = () => openHere(h);
   card.querySelector('[data-a="listen"]').onclick = () => playReel(h.document_id, [h]);
+  card.querySelector('[data-a="explained"]')?.addEventListener("click", async () => {
+    if (await openHere(h)) showExplanation(h.explained_message_id);
+  });
   card.querySelector('[data-a="copy"]').onclick = () => copyText(`"${h.text}"\n— ${titleOf(h.document_id)}, ${pathText(h)}`);
   card.querySelector('[data-a="delete"]').onclick = async () => {
     if (!confirm("Delete this highlight?")) return;
@@ -1238,10 +1290,11 @@ function vaultCard(h) {
   return card;
 }
 
-function openHere(h) {
+async function openHere(h) {
   const item = libraryItems.find((i) => i.id === h.document_id);
   if (!item) return toast("That book is not in your library any more.");
-  openItem(item, { highlight: h });
+  await openItem(item, { highlight: h });
+  return session?.item.id === item.id;
 }
 
 $("#vault-btn").onclick = () => showVault();
@@ -1288,6 +1341,640 @@ function openDeepLink() {
   const h = hl?.all().find((r) => r.document_id === item.id && r.start_word === word);
   openItem(item, h ? { highlight: h } : { word });
 }
+
+// ---------------------------------------------------------------------------
+// Tutor: answers only from your books, with a source for each point (docs/TUTOR.md)
+
+const tutor = { scope: "book", threadId: null, threadFor: undefined, busy: false, source: null, preparing: new Map() };
+
+// Cut a book into pieces and make their search numbers. Once per book; later
+// opens only check that it is done.
+function prepareBook(item, doc, chapters) {
+  if (!isCloud()) return Promise.resolve();
+  if (tutor.preparing.has(item.id)) return tutor.preparing.get(item.id);
+  const job = (async () => {
+    let { total, left } = await cloud.chunkStatus(item.id);
+    if (!total) {
+      const chunks = chunkDocument(doc, chapters);
+      if (!chunks.length) return;
+      await cloud.addChunks(item.id, chunks);
+      total = left = chunks.length;
+    }
+    while (left > 0) {
+      showPrep(item.id, total, left);
+      const r = await cloud.indexChunks(item.id);
+      if (!r?.made) break;
+      left = r.left;
+    }
+    showPrep(item.id, total, 0);
+  })();
+  tutor.preparing.set(item.id, job);
+  job.catch((err) => {
+    tutor.preparing.delete(item.id);
+    showPrep(item.id, 0, 0, err);
+  });
+  return job;
+}
+
+function showPrep(docId, total, left, err) {
+  if (!session || session.item.id !== docId) return;
+  const el = $("#tutor-prep");
+  if (err) {
+    el.textContent = `Could not prepare this book for the tutor: ${err.message}`;
+    el.hidden = false;
+    return;
+  }
+  el.hidden = left === 0;
+  el.textContent = `Preparing this book for the tutor… ${Math.round((100 * (total - left)) / Math.max(1, total))}%`;
+}
+
+async function openTutor() {
+  if (!session) return;
+  closeSheets();
+  $("#tutor").hidden = false;
+  if (!isCloud()) {
+    // The tutor searches books stored in Supabase, so it needs the Cloud library.
+    $("#tutor-ask").hidden = true;
+    $("#tutor-empty").replaceChildren(cloudOffer("The tutor works with your Cloud library. Switch once; your PC books can be copied there."));
+    return;
+  }
+  $("#tutor-source").hidden = true;
+  $("#tutor-q").placeholder = tutor.scope === "book" ? "Ask about this book…" : "Ask about all your books…";
+  const key = tutor.scope === "book" ? session.item.id : null;
+  if (tutor.threadFor !== key) await loadThread(key);
+  session.chaptersReady.then((c) => prepareBook(session.item, session.doc, c)).catch(() => {});
+  if (!matchMedia("(pointer: coarse)").matches) $("#tutor-q").focus();
+}
+
+function closeTutor() {
+  $("#tutor").hidden = true;
+  $("#tutor-profile").hidden = true;
+}
+
+function clearLog() {
+  $("#tutor-log").replaceChildren($("#tutor-empty"));
+  $("#tutor-empty").hidden = false;
+}
+
+// The newest chat for this book, or the chat threadId (a saved explanation).
+async function loadThread(key, threadId = null) {
+  tutor.threadFor = key;
+  tutor.threadId = null;
+  clearLog();
+  try {
+    const id = threadId || (await cloud.latestThread(key))?.id;
+    if (!id || tutor.threadFor !== key) return;
+    tutor.threadId = id;
+    for (const m of await cloud.threadMessages(id)) {
+      if (m.role === "user") addQuestion(m.content);
+      else {
+        const a = addAnswer();
+        a.el.dataset.id = m.id;
+        a.finish(m.parts?.length ? m.parts : [{ text: m.content, cites: [] }], m.sources || []);
+      }
+    }
+  } catch (err) {
+    toast(`Could not load the chat: ${err.message}`);
+  }
+}
+
+function logEl() {
+  $("#tutor-empty").hidden = true;
+  return $("#tutor-log");
+}
+function scrollLog(force) {
+  const log = $("#tutor-log");
+  if (force || log.scrollHeight - log.scrollTop - log.clientHeight < 120) log.scrollTop = log.scrollHeight;
+}
+
+function addQuestion(text) {
+  const q = document.createElement("div");
+  q.className = "t-q";
+  q.textContent = text;
+  logEl().append(q);
+  scrollLog(true);
+}
+
+function addAnswer() {
+  const a = document.createElement("div");
+  a.className = "t-a";
+  a.innerHTML = '<p class="thinking">Looking through your books…</p>';
+  logEl().append(a);
+  scrollLog(true);
+  return {
+    el: a,
+    stream(text) {
+      let box = a.querySelector(".streaming");
+      if (!box) {
+        a.innerHTML = '<div class="streaming"></div>';
+        box = a.firstChild;
+      }
+      // The [n] marks become source buttons when the answer is done; hide them until then.
+      box.textContent = text.replace(/\s*\[\d+\]/g, "").replace(/\s*\[\d*$/, "");
+      scrollLog();
+    },
+    finish(parts, sources) {
+      a.sources = sources;
+      a.innerHTML = answerHtml(parts) + sourcesHtml(sources);
+      scrollLog();
+    },
+    fail(msg) {
+      a.innerHTML = "";
+      const p = document.createElement("p");
+      p.className = "error";
+      p.textContent = msg;
+      a.append(p);
+    },
+  };
+}
+
+function sourcesHtml(sources) {
+  if (!sources?.length) return "";
+  const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+  const rows = sources
+    .map((s) => `<button class="t-src" data-n="${s.n}"><span class="cite">${s.n}</span><span class="t-src-body"><b>${esc(sourcePath(s))}</b><em>${esc(s.quote || s.text)}</em></span></button>`)
+    .join("");
+  return `<div class="t-sources"><p>Sources</p>${rows}</div>`;
+}
+
+async function ask(body) {
+  if (tutor.busy || !session) return null;
+  tutor.busy = true;
+  $("#tutor-send").disabled = true;
+  addQuestion(body.question || `Explain: “${body.selection.slice(0, 160)}”`);
+  const a = addAnswer();
+  const item = session.item;
+  let messageId = null;
+  try {
+    // A brand-new book: let it finish preparing before searching it.
+    if (tutor.scope === "book") await prepareBook(item, session.doc, await session.chaptersReady).catch(() => {});
+    let text = "";
+    await cloud.askTutor(
+      {
+        ...body,
+        thread_id: tutor.threadId,
+        document_ids: tutor.scope === "book" ? [item.id] : null,
+        near: body.near || { document_id: item.id, word: session?.player.word ?? 0 },
+      },
+      (m) => {
+        if (m.t === "meta") tutor.threadId = m.thread_id;
+        else if (m.t === "text") a.stream((text += m.text));
+        else if (m.t === "done") {
+          messageId = m.message_id;
+          a.el.dataset.id = m.message_id || "";
+          a.finish(m.parts, m.sources);
+        }
+        else if (m.t === "error") a.fail(m.error);
+      },
+    );
+  } catch (err) {
+    a.fail(err.message);
+  }
+  tutor.busy = false;
+  $("#tutor-send").disabled = false;
+  return messageId;
+}
+
+// The cited words inside a piece, so "Open here" lights up exactly them.
+function locateQuote(doc, src) {
+  const norm = (s) => s.toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
+  const want = (src.quote || "").split(/\s+/).map(norm).filter(Boolean);
+  if (want.length) {
+    const head = want.slice(0, 6);
+    for (let i = src.start_word; i <= src.end_word; i++) {
+      if (head.every((w, k) => norm(doc.words[i + k]?.display || "") === w)) {
+        return { start: i, end: Math.min(src.end_word, i + want.length - 1) };
+      }
+    }
+  }
+  return { start: src.start_word, end: src.end_word };
+}
+
+function goToSource(src, play) {
+  if (session && session.item.id === src.document_id) {
+    const at = locateQuote(session.doc, src);
+    session.player.seekWord(at.start, play);
+    session.reader.setActive(session.player.word, session.player.sentence);
+    setFollow(true);
+    session.reader.flash(at.start, at.end);
+    if (matchMedia("(max-width: 700px)").matches) closeTutor();
+    return;
+  }
+  const item = libraryItems.find((i) => i.id === src.document_id);
+  if (!item) return toast("That book is not in your library any more.");
+  openItem(item, { word: src.start_word });
+}
+
+$("#tutor-btn").onclick = () => ($("#tutor").hidden ? openTutor() : closeTutor());
+$("#tutor-close").onclick = () => closeTutor();
+$("#tutor-new").onclick = () => {
+  tutor.threadId = null;
+  clearLog();
+  $("#tutor-q").focus();
+};
+function setTutorScope(scope) {
+  tutor.scope = scope;
+  document.querySelectorAll("[data-scope]").forEach((x) => x.classList.toggle("on", x.dataset.scope === scope));
+}
+document.querySelectorAll("[data-scope]").forEach((b) => {
+  b.onclick = () => {
+    setTutorScope(b.dataset.scope);
+    openTutor();
+  };
+});
+$("#tutor-ask").onsubmit = (e) => {
+  e.preventDefault();
+  const q = $("#tutor-q").value.trim();
+  if (!q || tutor.busy) return;
+  $("#tutor-q").value = "";
+  $("#tutor-q").style.height = "";
+  ask({ question: q });
+};
+$("#tutor-q").onkeydown = (e) => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    $("#tutor-ask").requestSubmit();
+  }
+};
+$("#tutor-q").oninput = (e) => {
+  e.target.style.height = "";
+  e.target.style.height = `${Math.min(140, e.target.scrollHeight)}px`;
+};
+$("#tutor-log").onclick = (e) => {
+  const hit = e.target.closest(".cite, .t-src");
+  const answer = e.target.closest(".t-a");
+  if (!hit || !answer?.sources) return;
+  const src = answer.sources.find((s) => String(s.n) === hit.dataset.n || String(s.n) === hit.textContent);
+  if (!src) return;
+  tutor.source = src;
+  $("#ts-path").textContent = sourcePath(src);
+  const quote = src.quote || src.text;
+  $("#ts-quote").textContent = quote.length > 600 ? `${quote.slice(0, 597)}…` : quote;
+  $("#tutor-source").hidden = false;
+};
+$("#ts-close").onclick = () => ($("#tutor-source").hidden = true);
+$("#ts-open").onclick = () => tutor.source && goToSource(tutor.source, false);
+$("#ts-read").onclick = () => tutor.source && goToSource(tutor.source, true);
+
+$("#tutor-me").onclick = async () => {
+  const form = $("#tutor-profile");
+  if (!form.hidden) return (form.hidden = true);
+  try {
+    const p = await cloud.getTutorProfile();
+    for (const name of ["level", "goal", "style"]) form.elements[name].value = p[name] || "";
+    form.hidden = false;
+  } catch (err) {
+    toast(err.message);
+  }
+};
+$("#tutor-profile").onsubmit = async (e) => {
+  e.preventDefault();
+  const f = e.target.elements;
+  try {
+    await cloud.saveTutorProfile({ level: f.level.value, goal: f.goal.value.trim(), style: f.style.value.trim() });
+    e.target.hidden = true;
+    toast("Saved. The tutor will teach you this way.");
+  } catch (err) {
+    toast(err.message);
+  }
+};
+
+// ---- "Don't get it": flag words, and the tutor explains them right away ----
+
+// The color whose meaning says "I don't understand" (default: purple, "Don't get it").
+const isConfused = (colorId) => /don['’]?t get|confus|unclear|not sure|lost/i.test(colorOf(hl.palette, colorId).label || "");
+
+async function explainWords(start, end, highlightId) {
+  if (!session) return;
+  closeSheets();
+  setTutorScope("book");
+  await openTutor(); // on the PC library this shows the "Switch to Cloud" offer
+  if (!isCloud()) return;
+  const text = rangeText(start, end);
+  const short = text.length > 240 ? `${text.slice(0, 237)}…` : text;
+  const id = await ask({
+    question: `I don't get this part: “${short}” Explain it to me simply, step by step.`,
+    selection: text,
+    near: { document_id: session.item.id, word: start },
+  });
+  // The highlight remembers its explanation, so it can be read again later.
+  if (id && highlightId) hl.update(highlightId, { explained_message_id: id }).catch(() => {});
+}
+
+async function showExplanation(messageId) {
+  if (!session) return;
+  closeSheets();
+  try {
+    const threadId = await cloud.messageThread(messageId);
+    if (!threadId) return toast("That explanation was deleted.");
+    setTutorScope("book");
+    await openTutor();
+    if (tutor.threadId !== threadId) await loadThread(session.item.id, threadId);
+    $(`.t-a[data-id="${messageId}"]`)?.scrollIntoView({ block: "start" });
+  } catch (err) {
+    toast(err.message);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Quizzes: ABCD questions from the book itself, with the page for every answer
+
+const quiz = { scope: "book", count: 10, current: null, i: 0, answers: [] };
+const LETTERS = ["A", "B", "C", "D"];
+const SCOPE_NAME = { book: "Whole book", chapter: "Chapter", confused: "Don't get it" };
+const escHtml = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+
+function confusedRanges() {
+  if (!session || !hl) return [];
+  return hl
+    .forDocument(session.item.id)
+    .filter((h) => isConfused(h.color))
+    .map((h) => ({ start: h.start_word, end: h.end_word }));
+}
+
+function syncQuizSheet() {
+  document.querySelectorAll("[data-qscope]").forEach((b) => b.classList.toggle("on", b.dataset.qscope === quiz.scope));
+  document.querySelectorAll("[data-qcount]").forEach((b) => b.classList.toggle("on", Number(b.dataset.qcount) === quiz.count));
+}
+
+async function openQuizSheet() {
+  if (!session) return;
+  closeSheets();
+  closeTutor();
+  const n = confusedRanges().length;
+  const confused = $('[data-qscope="confused"]');
+  confused.textContent = `My “Don't get it” (${n})`;
+  confused.disabled = !n;
+  if (quiz.scope === "confused" && !n) quiz.scope = "book";
+  syncQuizSheet();
+  $("#qs-start").disabled = !isCloud();
+  $("#qs-note").replaceChildren(isCloud() ? "" : cloudOffer("Quizzes work with your Cloud library."));
+  $("#quiz-sheet").hidden = false;
+  renderPastQuizzes();
+}
+
+async function renderPastQuizzes() {
+  const box = $("#qs-past");
+  box.innerHTML = "";
+  if (!isCloud() || !session) return;
+  let list = [];
+  try {
+    list = await cloud.listQuizzes(session.item.id);
+  } catch {
+    return;
+  }
+  if (!list.length) return;
+  box.innerHTML = '<p class="note small">Your quizzes</p>';
+  for (const q of list) {
+    const b = document.createElement("button");
+    b.className = "qs-item";
+    const date = new Date(q.created_at).toLocaleDateString(undefined, { day: "numeric", month: "short" });
+    const result = q.finished_at ? `${q.score}/${q.total}` : "Resume";
+    b.innerHTML = `<span><b>${escHtml(q.title)}</b><em>${escHtml(SCOPE_NAME[q.scope] || "")} · ${date}</em></span><strong class="${q.finished_at ? "" : "resume"}">${result}</strong>`;
+    b.onclick = () => {
+      $("#quiz-sheet").hidden = true;
+      startQuiz(q);
+    };
+    box.append(b);
+  }
+}
+
+document.querySelectorAll("[data-qscope]").forEach((b) => (b.onclick = () => ((quiz.scope = b.dataset.qscope), syncQuizSheet())));
+document.querySelectorAll("[data-qcount]").forEach((b) => (b.onclick = () => ((quiz.count = Number(b.dataset.qcount)), syncQuizSheet())));
+$("#qs-close").onclick = () => ($("#quiz-sheet").hidden = true);
+$("#tutor-quiz").onclick = () => openQuizSheet();
+
+$("#qs-start").onclick = async () => {
+  if (!session || !isCloud()) return;
+  const btn = $("#qs-start");
+  btn.disabled = true;
+  btn.textContent = "Writing your quiz…";
+  $("#qs-note").textContent = "Reading your book. This takes about 20 seconds.";
+  try {
+    const chapters = await session.chaptersReady;
+    await prepareBook(session.item, session.doc, chapters);
+    const q = await cloud.makeQuiz({
+      document_id: session.item.id,
+      scope: quiz.scope,
+      count: quiz.count,
+      chapter: chapterAt(session.chapters, session.player.word),
+      word: session.player.word,
+      ranges: confusedRanges(),
+    });
+    $("#quiz-sheet").hidden = true;
+    startQuiz(q);
+  } catch (err) {
+    $("#qs-note").textContent = err.message;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Start the quiz";
+  }
+};
+
+function startQuiz(q) {
+  quiz.current = q;
+  quiz.answers = Array.isArray(q.answers) ? [...q.answers] : [];
+  $("#quiz-book").textContent = session?.item.title || "";
+  $("#quiz-name").textContent = q.title;
+  $("#quiz").hidden = false;
+  $("#quiz-return")?.remove();
+  if (q.finished_at) return showResults();
+  quiz.i = Math.max(0, q.questions.findIndex((_, k) => quiz.answers[k] == null));
+  if (quiz.answers.length >= q.questions.length && quiz.answers.every((a) => a != null)) return showResults();
+  renderQuestion();
+}
+
+function closeQuiz() {
+  $("#quiz").hidden = true;
+  $("#quiz-return")?.remove();
+}
+
+function quizProgress() {
+  const total = quiz.current.questions.length;
+  const done = quiz.answers.filter((a) => a != null).length;
+  $("#quiz-bar").style.width = `${(100 * done) / total}%`;
+}
+
+function renderQuestion() {
+  const q = quiz.current.questions[quiz.i];
+  const total = quiz.current.questions.length;
+  $("#quiz-count").textContent = `${quiz.i + 1} / ${total}`;
+  quizProgress();
+  const body = $("#quiz-body");
+  body.innerHTML = `<div class="q-card">
+      <p class="q-kicker">Question ${quiz.i + 1} of ${total}</p>
+      <h3 class="q-text">${escHtml(q.question)}</h3>
+      <div class="q-options">${q.options
+        .map((o, k) => `<button class="q-opt" data-k="${k}"><b>${LETTERS[k]}</b><span>${escHtml(o)}</span></button>`)
+        .join("")}</div>
+      <div class="q-feedback" hidden></div>
+      <div class="q-nav"><button class="btn primary" id="q-next" hidden></button></div>
+    </div>`;
+  body.querySelectorAll(".q-opt").forEach((b) => (b.onclick = () => answerQuestion(Number(b.dataset.k))));
+  body.querySelector("#q-next").onclick = () => nextQuestion();
+  body.scrollTop = 0;
+  if (quiz.answers[quiz.i] != null) showFeedback();
+}
+
+function answerQuestion(k) {
+  if (quiz.answers[quiz.i] != null) return;
+  quiz.answers[quiz.i] = k;
+  for (let n = 0; n < quiz.current.questions.length; n++) if (quiz.answers[n] === undefined) quiz.answers[n] = null;
+  showFeedback();
+  quizProgress();
+  cloud.saveQuizAnswers(quiz.current.id, quiz.answers).catch(() => {});
+}
+
+function sourceLabel(src) {
+  return [src.chapter, src.page ? `p. ${src.page}` : ""].filter(Boolean).join(" · ") || "Open in the book";
+}
+
+function showFeedback() {
+  const q = quiz.current.questions[quiz.i];
+  const chosen = quiz.answers[quiz.i];
+  const right = chosen === q.correct;
+  document.querySelectorAll(".q-opt").forEach((b) => {
+    const k = Number(b.dataset.k);
+    b.disabled = true;
+    b.classList.toggle("right", k === q.correct);
+    b.classList.toggle("wrong", k === chosen && !right);
+    b.classList.toggle("dim", k !== q.correct && k !== chosen);
+  });
+  const fb = document.querySelector(".q-feedback");
+  fb.className = `q-feedback ${right ? "ok" : "bad"}`;
+  fb.innerHTML = `<p class="q-verdict">${right ? "Right!" : `Not quite. The answer is ${LETTERS[q.correct]}.`}</p>
+    <p class="q-expl">${escHtml(q.explanation)}</p>
+    <button class="q-src"><span>“${escHtml(q.source.quote)}”</span><em>${escHtml(sourceLabel(q.source))} · Open in the book</em></button>`;
+  fb.hidden = false;
+  fb.querySelector(".q-src").onclick = () => openQuizSource(q.source);
+  const next = document.querySelector("#q-next");
+  next.textContent = quiz.i === quiz.current.questions.length - 1 ? "See my results" : "Next question";
+  next.hidden = false;
+  next.focus({ preventScroll: true });
+}
+
+function nextQuestion() {
+  if (quiz.i < quiz.current.questions.length - 1) {
+    quiz.i++;
+    renderQuestion();
+  } else showResults();
+}
+
+// Leave the quiz for the book; a small button brings you back.
+function openQuizSource(src) {
+  $("#quiz").hidden = true;
+  goToSource({ ...src, document_id: quiz.current.document_id }, false);
+  if ($("#quiz-return")) return;
+  const back = document.createElement("button");
+  back.id = "quiz-return";
+  back.className = "btn primary quiz-return";
+  back.textContent = "Back to the quiz";
+  back.onclick = () => {
+    back.remove();
+    $("#quiz").hidden = false;
+  };
+  document.body.append(back);
+}
+
+function showResults() {
+  const q = quiz.current;
+  const total = q.questions.length;
+  const score = q.questions.filter((x, k) => quiz.answers[k] === x.correct).length;
+  if (!q.finished_at) {
+    q.finished_at = new Date().toISOString();
+    q.score = score;
+    q.answers = [...quiz.answers];
+    cloud.saveQuizAnswers(q.id, quiz.answers, { score }).catch((err) => toast(`Could not save the result: ${err.message}`));
+  }
+  const pct = Math.round((100 * score) / total);
+  const verdict = pct >= 90 ? "Excellent!" : pct >= 70 ? "Great work" : pct >= 50 ? "Good start" : "Worth another look";
+  const wrong = q.questions.map((x, k) => k).filter((k) => quiz.answers[k] !== q.questions[k].correct);
+  $("#quiz-count").textContent = "Results";
+  $("#quiz-bar").style.width = "100%";
+  const body = $("#quiz-body");
+  body.innerHTML = `<div class="q-results">
+      <div class="q-ring" style="--p:${pct}"><div><b>${score}/${total}</b><span>${pct}%</span></div></div>
+      <h3>${verdict}</h3>
+      <p class="note">${wrong.length ? `You got ${score} of ${total} right. Tap “Explain” on a question and the tutor walks you through it, from your book.` : "Every answer right. This part of the book stayed with you."}</p>
+      <div class="q-actions">
+        ${wrong.length ? '<button class="btn primary" data-r="explain-all">Explain my mistakes</button>' : ""}
+        <button class="btn" data-r="retake">Try again</button>
+        <button class="btn" data-r="new">New quiz</button>
+      </div>
+      <ol class="q-review">${q.questions
+        .map((x, k) => {
+          const mine = quiz.answers[k];
+          const ok = mine === x.correct;
+          return `<li class="${ok ? "ok" : "bad"}">
+            <p class="q-r-q"><i>${ok ? "✓" : "✗"}</i>${escHtml(x.question)}</p>
+            ${ok ? `<p class="q-r-a">${LETTERS[x.correct]}. ${escHtml(x.options[x.correct])}</p>` : `<p class="q-r-a mine">You: ${mine == null ? "no answer" : `${LETTERS[mine]}. ${escHtml(x.options[mine])}`}</p><p class="q-r-a">Right: ${LETTERS[x.correct]}. ${escHtml(x.options[x.correct])}</p>`}
+            <p class="q-expl">${escHtml(x.explanation)}</p>
+            <div class="q-r-actions"><button data-src="${k}">${escHtml(sourceLabel(x.source))}</button>${ok ? "" : `<button data-explain="${k}">Explain</button>`}</div>
+          </li>`;
+        })
+        .join("")}</ol>
+    </div>`;
+  body.scrollTop = 0;
+  body.querySelector('[data-r="retake"]').onclick = async () => {
+    try {
+      startQuiz(await cloud.retakeQuiz(q));
+    } catch (err) {
+      toast(err.message);
+    }
+  };
+  body.querySelector('[data-r="new"]').onclick = () => {
+    closeQuiz();
+    openQuizSheet();
+  };
+  body.querySelector('[data-r="explain-all"]')?.addEventListener("click", () => explainQuiz(wrong));
+  body.querySelectorAll("[data-src]").forEach((b) => (b.onclick = () => openQuizSource(q.questions[Number(b.dataset.src)].source)));
+  body.querySelectorAll("[data-explain]").forEach((b) => (b.onclick = () => explainQuiz([Number(b.dataset.explain)])));
+}
+
+// The tutor explains the questions you got wrong, from the book.
+async function explainQuiz(indexes) {
+  if (!session || !indexes.length) return;
+  const q = quiz.current;
+  const lines = indexes.map((k) => {
+    const x = q.questions[k];
+    const mine = quiz.answers[k];
+    return `Question: "${x.question}" I chose "${mine == null ? "nothing" : x.options[mine]}", but the right answer is "${x.options[x.correct]}".`;
+  });
+  closeQuiz();
+  setTutorScope("book");
+  await openTutor();
+  if (!isCloud()) return;
+  ask({
+    question:
+      indexes.length === 1
+        ? `In my quiz I got this wrong. ${lines[0]} Help me understand why, from the book.`
+        : `In my quiz I got these wrong:\n${lines.map((l, n) => `${n + 1}. ${l}`).join("\n")}\nHelp me understand each one, from the book.`,
+    near: { document_id: q.document_id, word: q.questions[indexes[0]].source.start_word },
+  });
+}
+
+$("#quiz-close").onclick = () => closeQuiz();
+document.addEventListener("keydown", (e) => {
+  if ($("#quiz").hidden || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.key === "Escape") return closeQuiz();
+  const k = "abcd1234".indexOf(e.key.toLowerCase());
+  if (k >= 0 && document.querySelector(".q-opt:not(:disabled)")) answerQuestion(k % 4);
+});
+
+// ---- the end of a book: offer a quiz once ----
+
+function offerFinishQuiz() {
+  if (!session || session.finishOffered || !isCloud()) return;
+  session.finishOffered = true;
+  $("#finish-title").textContent = `You finished “${session.item.title}”`;
+  $("#finish-sheet").hidden = false;
+}
+$("#finish-later").onclick = () => ($("#finish-sheet").hidden = true);
+$("#finish-quiz").onclick = () => {
+  quiz.scope = "book";
+  openQuizSheet();
+  $("#qs-start").click();
+};
 
 // ---- the highlight reel: only your highlights, one after another ----
 
@@ -1380,7 +2067,7 @@ async function copyText(text) {
 // ---- keyboard ----
 
 document.addEventListener("keydown", (e) => {
-  if (!session || e.target.closest("input, select, textarea") || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (!session || !$("#quiz").hidden || e.target.closest("input, select, textarea") || e.ctrlKey || e.metaKey || e.altKey) return;
   if (e.code === "Space") {
     e.preventDefault();
     session.player.toggle();

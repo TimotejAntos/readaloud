@@ -57,8 +57,7 @@
         <button class="btn" id="vault-btn" title="All your highlights">
           <svg viewBox="0 0 24 24" class="i-inline"><path d="M4 20h4L19 9l-4-4L4 16z" /><path d="M13.5 6.5l4 4" /></svg>
           <span class="hide-narrow">Highlights</span>
-        </button>
-        <button class="btn primary" id="add">Upload PDF</button>
+        </button>        <button class="btn primary" id="add">Upload PDF</button>
         <button class="icon-btn" id="account-btn" data-pop aria-label="Account and settings" title="Account">
           <svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4" /><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6" /></svg>
         </button>
@@ -143,6 +142,9 @@
       </div>
       <button class="icon-btn" id="reader-vault" aria-label="Highlights in this book" title="Highlights in this book">
         <svg viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16z" /><path d="M13.5 6.5l4 4" /></svg>
+      </button>
+      <button class="icon-btn" id="tutor-btn" aria-label="Ask the tutor" title="Ask the tutor" hidden>
+        <svg viewBox="0 0 24 24"><path d="M4 5h16v11H9l-5 4z" /><path d="M9 9.5h6M9 12.5h4" /></svg>
       </button>
       <button class="icon-btn" id="format-btn" data-pop aria-label="Text format" title="Text format">Aa</button>
       <div class="pop" id="format-pop" hidden>
@@ -256,7 +258,7 @@
             <span id="listen-label">Voice</span>
             <span class="sleep-badge" id="sleep-badge" hidden></span>
           </button>
-          <div class="pop up sheet" id="listen-pop" hidden>
+          <div class="pop up" id="listen-pop" hidden>
             <div class="row">
               <label>Voice engine</label>
               <div class="seg engines" id="engines"></div>
@@ -301,6 +303,8 @@
     <textarea id="hl-note" rows="2" maxlength="2000" placeholder="Add a note (optional)"></textarea>
     <div class="hl-actions">
       <button class="btn" id="hl-play">▶ Play</button>
+      <button class="btn" id="hl-explain" title="The tutor explains these words from your book">Explain</button>
+      <button class="btn" id="hl-explained" hidden>See explanation</button>
       <button class="btn" id="hl-copy">Copy</button>
       <button class="btn" id="hl-delete">Delete</button>
       <button class="btn primary push-right" id="hl-done">Done</button>
@@ -323,6 +327,114 @@
     <p class="note small bad" id="palette-error"></p>
     <button class="btn primary wide" id="palette-save">Save</button>
   </div>
+
+  <!-- The tutor: answers only from your books, with sources -->
+  <aside id="tutor" class="tutor" role="dialog" aria-label="Tutor" hidden>
+    <div class="tutor-head">
+      <p class="sheet-title">Tutor</p>
+      <div class="seg" role="group" aria-label="Which books">
+        <button data-scope="book" class="on">This book</button>
+        <button data-scope="all">All books</button>
+      </div>
+      <button class="icon-btn" id="tutor-quiz" aria-label="Quiz me" title="Quiz me">
+        <svg viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="2" /><path d="M8 8l1.5 1.5L12 7M8 14l1.5 1.5L12 13M14 8.5h3M14 14.5h3" /></svg>
+      </button>
+      <button class="icon-btn" id="tutor-me" aria-label="How I like to learn" title="How I like to learn">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4" /><path d="M4 20c1.5-4 4.5-6 8-6s6.5 2 8 6" /></svg>
+      </button>
+      <button class="icon-btn" id="tutor-new" aria-label="New chat" title="New chat">
+        <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></svg>
+      </button>
+      <button class="icon-btn" id="tutor-close" aria-label="Close">✕</button>
+    </div>
+    <form id="tutor-profile" class="tutor-profile" hidden>
+      <p class="note small">The tutor teaches you this way, in every book.</p>
+      <label>My level
+        <select name="level">
+          <option value="">Not set</option>
+          <option>New to the topic</option>
+          <option>I know the basics</option>
+          <option>Advanced</option>
+        </select>
+      </label>
+      <label>My goal <input name="goal" maxlength="160" placeholder="e.g. use this at work, pass an exam" /></label>
+      <label>How I like to learn <input name="style" maxlength="160" placeholder="e.g. short steps, everyday examples" /></label>
+      <div class="hl-actions"><button class="btn primary push-right" type="submit">Save</button></div>
+    </form>
+    <p class="tutor-prep note small" id="tutor-prep" hidden></p>
+    <div class="tutor-log" id="tutor-log">
+      <div class="tutor-empty" id="tutor-empty">
+        <p>Ask anything about this book.</p>
+        <p class="note small">Answers come only from your books, with a source for each point. Tap a number to see the page.</p>
+      </div>
+    </div>
+    <div class="tutor-source" id="tutor-source" hidden>
+      <div class="sheet-head">
+        <p class="note small" id="ts-path"></p>
+        <button class="icon-btn" id="ts-close" aria-label="Close source">✕</button>
+      </div>
+      <p class="sheet-quote" id="ts-quote"></p>
+      <div class="hl-actions">
+        <button class="btn" id="ts-open">Open here</button>
+        <button class="btn primary" id="ts-read">▶ Read aloud</button>
+      </div>
+    </div>
+    <form class="tutor-ask" id="tutor-ask">
+      <textarea id="tutor-q" rows="1" maxlength="2000" placeholder="Ask about this book…" aria-label="Your question"></textarea>
+      <button class="btn primary" type="submit" id="tutor-send">Ask</button>
+    </form>
+  </aside>
+
+  <!-- Start a quiz: what to test, how many questions, past results -->
+  <div id="quiz-sheet" class="sheet" role="dialog" aria-label="Quiz" hidden>
+    <div class="sheet-head">
+      <p class="sheet-title">Quiz me</p>
+      <button class="icon-btn" id="qs-close" aria-label="Close">✕</button>
+    </div>
+    <div class="row">
+      <span class="note small">What to test</span>
+      <div class="seg" id="qs-scope" role="group" aria-label="What to test">
+        <button data-qscope="chapter">This chapter</button>
+        <button data-qscope="book" class="on">Whole book</button>
+        <button data-qscope="confused">My “Don't get it”</button>
+      </div>
+    </div>
+    <div class="row">
+      <span class="note small">Questions</span>
+      <div class="seg" id="qs-count" role="group" aria-label="How many questions">
+        <button data-qcount="5">5</button>
+        <button data-qcount="10" class="on">10</button>
+        <button data-qcount="15">15</button>
+      </div>
+    </div>
+    <p class="note small" id="qs-note"></p>
+    <button class="btn primary wide" id="qs-start">Start the quiz</button>
+    <div class="qs-past" id="qs-past"></div>
+  </div>
+
+  <!-- You reached the end of a book -->
+  <div id="finish-sheet" class="sheet" role="dialog" aria-label="Book finished" hidden>
+    <p class="sheet-title" id="finish-title"></p>
+    <p class="note">Check what stayed with you: a short quiz from this book, with the right page for every answer.</p>
+    <div class="hl-actions">
+      <button class="btn" id="finish-later">Not now</button>
+      <button class="btn primary push-right" id="finish-quiz">Quiz me on the book</button>
+    </div>
+  </div>
+
+  <!-- The quiz: one question at a time, then the results -->
+  <section id="quiz" class="quiz" aria-label="Quiz" hidden>
+    <header class="quiz-head">
+      <button class="icon-btn" id="quiz-close" aria-label="Close the quiz">✕</button>
+      <div class="quiz-title">
+        <p id="quiz-book" class="note small"></p>
+        <h2 id="quiz-name"></h2>
+      </div>
+      <span class="quiz-count" id="quiz-count"></span>
+    </header>
+    <div class="quiz-bar"><i id="quiz-bar"></i></div>
+    <div class="quiz-body" id="quiz-body"></div>
+  </section>
 
   <div id="toast" class="toast" hidden></div>
   <div class="drag-veil">Drop to add to your library</div>
